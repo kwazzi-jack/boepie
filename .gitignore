@@ -16,6 +16,8 @@ wheels/
 # Local data
 data/
 traces/
+logs/
+cabs/
 
 # ChromaDB vector store (rebuilt from sources)
 chroma_data/
