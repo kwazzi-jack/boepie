@@ -1,13 +1,49 @@
-# Python-generated files
+# Python
 __pycache__/
-*.py[oc]
+*.py[cod]
 build/
 dist/
 wheels/
 *.egg-info
 
 # Virtual environments
-.venv
+.venv/
 
-# Local folders
+# IDE / editor
+.vscode/
+.idea/
+
+# Local data
 data/
+traces/
+
+# ChromaDB vector store (rebuilt from sources)
+chroma_data/
+
+# Source documents for RAG indexing (user-provided, not shipped)
+sources/
+
+# Stimela artefacts
+stimela.config.deps
+*.stimela.cache
+
+# Environment / secrets
+.env
+.env.*
+
+# OS
+.DS_Store
+
+# Archives / tarballs
+*.tar.gz
+*.zip
+
+# Stimela Files
+stimela.config.deps
+stimela.recipe.deps
+*.yml
+
+# Agent Files
+GEMINI.md
+AGENTS.md
+CLAUDE.md
