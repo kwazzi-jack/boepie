@@ -1,3 +1,5 @@
+import csv
+import io
 from typing import Any
 
 
@@ -31,3 +33,21 @@ def full_class_name(obj: Any) -> str:
 
 def cli_sanitise(value: str) -> str:
     return value.replace("_", "-")
+
+
+def write_csv(rows: list[dict[str, Any]], columns: list[str]) -> str:
+    """Serialise a list of row dicts to a CSV string.
+
+    Only the columns listed in ``columns`` are written, in that order.
+    Extra keys in each row are ignored; missing keys produce an empty cell.
+    """
+    buffer = io.StringIO()
+    writer = csv.DictWriter(
+        buffer,
+        fieldnames=columns,
+        lineterminator="\n",
+        extrasaction="ignore",
+    )
+    writer.writeheader()
+    writer.writerows(rows)
+    return buffer.getvalue()
