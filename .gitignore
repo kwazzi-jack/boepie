@@ -49,3 +49,10 @@ stimela.recipe.deps
 GEMINI.md
 AGENTS.md
 CLAUDE.md
+
+# LaTeX
+*.bib
+
+# Dev-stuff
+GITCONV.md
+scripts/files/
