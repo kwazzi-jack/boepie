@@ -8,9 +8,7 @@ The display groups drive the section-filtering used by the MCP tools.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime, timedelta
-from functools import cache
 from pathlib import Path
 from typing import Annotated, Any, Callable, ClassVar, Self
 
@@ -27,22 +25,7 @@ from pydantic import (
 from boepie.ms.extraction import extract_ms_metadata
 
 
-@dataclass(frozen=True)
-class FieldMeta:
-    display_name: str
-
-
-class _BoepieModel(BaseModel):
-    @classmethod
-    @cache
-    def field_metadata(cls) -> dict[str, FieldMeta | None]:
-        return {
-            name: next((entry for entry in field.metadata if isinstance(entry, FieldMeta)), None)
-            for name, field in cls.model_fields.items()
-        }
-
-
-# -- Per-field formatters for markdown rendering --
+# -- Per-field formatters for F3 rendering --
 # Each formatter receives the raw attribute value and returns either a
 # string (the rendered value) or None (skip this field). Anything not in
 # this dict falls through to _format_generic, so this stays data-driven
@@ -79,9 +62,9 @@ def _fmt_time_range(value: tuple[datetime, datetime]) -> str:
 def _fmt_spw_info(value: list[dict[str, Any]]) -> str | None:
     if not value:
         return None
-    return "\n" + "\n".join(
-        f"  - spw {entry['spw_id']}: {entry['n_channels']} ch, "
-        f"{entry['freq_start'] / 1e9:.3f}–{entry['freq_end'] / 1e9:.3f} GHz"
+    return "; ".join(
+        f"spw{entry['spw_id']}:{entry['n_channels']}ch:"
+        f"{entry['freq_start'] / 1e9:.3f}-{entry['freq_end'] / 1e9:.3f}GHz"
         for entry in value
     )
 
@@ -117,7 +100,7 @@ def _format_generic(value: Any) -> str | None:
     return str(value)
 
 
-class MSInfo(_BoepieModel):
+class MSInfo(BaseModel):
     """Structured metadata snapshot of a MeasurementSet.
 
     Populate via :meth:`from_path`, which opens the MS with python-casacore,
@@ -137,7 +120,7 @@ class MSInfo(_BoepieModel):
             "title": "Observation",
             "key": "observation",
             "fields": [
-                "path", "telescope", "observer", "project",
+                "telescope", "observer", "project",
                 "observation_date", "observation_id",
             ],
         },
@@ -226,79 +209,79 @@ class MSInfo(_BoepieModel):
     ]
 
     # === Observational ===
-    path: Annotated[Path, Field(description="Absolute path to the MS directory"), FieldMeta(display_name="Path")]
-    telescope: Annotated[str, Field(min_length=1, description="Telescope or array name"), FieldMeta(display_name="Telescope")]
-    observer: Annotated[str | None, Field(default=None), FieldMeta(display_name="Observer")]
-    project: Annotated[str | None, Field(default=None), FieldMeta(display_name="Project")]
-    observation_date: Annotated[datetime | None, Field(default=None), FieldMeta(display_name="Observation Date")]
-    observation_id: Annotated[str | None, Field(default=None), FieldMeta(display_name="Observation ID")]
+    path: Annotated[Path, Field(description="Absolute path to the MS directory")]
+    telescope: Annotated[str, Field(min_length=1, description="Telescope or array name")]
+    observer: Annotated[str | None, Field(default=None)]
+    project: Annotated[str | None, Field(default=None)]
+    observation_date: Annotated[datetime | None, Field(default=None)]
+    observation_id: Annotated[str | None, Field(default=None)]
 
     # === Array ===
-    number_of_antennas: Annotated[int, Field(ge=0), FieldMeta(display_name="Number of Antennas")]
-    antenna_names: Annotated[list[str], Field(default_factory=list), FieldMeta(display_name="Antenna Names")]
-    antenna_positions: Annotated[list[tuple[float, float, float]] | None, Field(default=None), FieldMeta(display_name="Antenna Positions")]
-    array_center: Annotated[tuple[float, float, float] | None, Field(default=None), FieldMeta(display_name="Array Center")]
+    number_of_antennas: Annotated[int, Field(ge=0)]
+    antenna_names: Annotated[list[str], Field(default_factory=list)]
+    antenna_positions: Annotated[list[tuple[float, float, float]] | None, Field(default=None)]
+    array_center: Annotated[tuple[float, float, float] | None, Field(default=None)]
 
     # === Data dimensions ===
-    number_of_rows: Annotated[int, Field(ge=0), FieldMeta(display_name="Number of Rows")]
-    number_of_channels: Annotated[int, Field(ge=0), FieldMeta(display_name="Number of Channels")]
-    number_of_polarizations: Annotated[int, Field(ge=0, le=4), FieldMeta(display_name="Number of Polarizations")]
-    number_of_baselines: Annotated[int, Field(ge=0), FieldMeta(display_name="Number of Baselines")]
-    number_of_timesteps: Annotated[int, Field(default=0, ge=0), FieldMeta(display_name="Number of Timesteps")]
-    number_of_spectral_windows: Annotated[int, Field(ge=0), FieldMeta(display_name="Number of Spectral Windows")]
+    number_of_rows: Annotated[int, Field(ge=0)]
+    number_of_channels: Annotated[int, Field(ge=0)]
+    number_of_polarizations: Annotated[int, Field(ge=0, le=4)]
+    number_of_baselines: Annotated[int, Field(ge=0)]
+    number_of_timesteps: Annotated[int, Field(default=0, ge=0)]
+    number_of_spectral_windows: Annotated[int, Field(ge=0)]
 
     # === Frequency ===
-    central_frequency: Annotated[float, Field(ge=0.0), FieldMeta(display_name="Central Frequency")]
-    channel_width: Annotated[float, Field(ge=0.0), FieldMeta(display_name="Channel Width")]
-    total_bandwidth: Annotated[float, Field(ge=0.0), FieldMeta(display_name="Total Bandwidth")]
-    frequency_range: Annotated[tuple[float, float], Field(), FieldMeta(display_name="Frequency Range")]
-    spectral_window_info: Annotated[list[dict[str, Any]], Field(default_factory=list), FieldMeta(display_name="Spectral Window Info")]
+    central_frequency: Annotated[float, Field(ge=0.0)]
+    channel_width: Annotated[float, Field(ge=0.0)]
+    total_bandwidth: Annotated[float, Field(ge=0.0)]
+    frequency_range: Annotated[tuple[float, float], Field()]
+    spectral_window_info: Annotated[list[dict[str, Any]], Field(default_factory=list)]
 
     # === Temporal ===
-    time_range: Annotated[tuple[datetime, datetime] | None, Field(default=None), FieldMeta(display_name="Time Range")]
-    integration_time: Annotated[float | None, Field(default=None, ge=0.0), FieldMeta(display_name="Integration Time")]
-    total_observation_time: Annotated[float | None, Field(default=None, ge=0.0), FieldMeta(display_name="Total Observation Time")]
+    time_range: Annotated[tuple[datetime, datetime] | None, Field(default=None)]
+    integration_time: Annotated[float | None, Field(default=None, ge=0.0)]
+    total_observation_time: Annotated[float | None, Field(default=None, ge=0.0)]
 
     # === Spatial / Pointing ===
-    phase_center_ra: Annotated[float, Field(ge=0.0, lt=360.0), FieldMeta(display_name="Phase Center RA")]
-    phase_center_dec: Annotated[float, Field(ge=-90.0, le=90.0), FieldMeta(display_name="Phase Center Dec")]
-    field_names: Annotated[list[str], Field(default_factory=list), FieldMeta(display_name="Field Names")]
-    number_of_fields: Annotated[int, Field(default=1, ge=0), FieldMeta(display_name="Number of Fields")]
+    phase_center_ra: Annotated[float, Field(ge=0.0, lt=360.0)]
+    phase_center_dec: Annotated[float, Field(ge=-90.0, le=90.0)]
+    field_names: Annotated[list[str], Field(default_factory=list)]
+    number_of_fields: Annotated[int, Field(default=1, ge=0)]
 
     # === Polarization ===
-    polarization_types: Annotated[list[str], Field(default_factory=list), FieldMeta(display_name="Polarization Types")]
-    stokes_types: Annotated[list[str] | None, Field(default=None), FieldMeta(display_name="Stokes Types")]
+    polarization_types: Annotated[list[str], Field(default_factory=list)]
+    stokes_types: Annotated[list[str] | None, Field(default=None)]
 
     # === Data columns ===
-    has_data: Annotated[bool, Field(default=True), FieldMeta(display_name="Has DATA")]
-    has_corrected_data: Annotated[bool, Field(default=False), FieldMeta(display_name="Has CORRECTED_DATA")]
-    has_model_data: Annotated[bool, Field(default=False), FieldMeta(display_name="Has MODEL_DATA")]
-    available_data_columns: Annotated[list[str], Field(default_factory=list), FieldMeta(display_name="Available Data Columns")]
-    nonzero_data_columns: Annotated[list[str], Field(default_factory=list), FieldMeta(display_name="Non-zero Data Columns")]
-    data_column_info: Annotated[list[dict[str, Any]], Field(default_factory=list), FieldMeta(display_name="Data Column Info")]
-    main_table_columns: Annotated[list[str], Field(default_factory=list), FieldMeta(display_name="Main Table Columns")]
+    has_data: Annotated[bool, Field(default=True)]
+    has_corrected_data: Annotated[bool, Field(default=False)]
+    has_model_data: Annotated[bool, Field(default=False)]
+    available_data_columns: Annotated[list[str], Field(default_factory=list)]
+    nonzero_data_columns: Annotated[list[str], Field(default_factory=list)]
+    data_column_info: Annotated[list[dict[str, Any]], Field(default_factory=list)]
+    main_table_columns: Annotated[list[str], Field(default_factory=list)]
 
     # === Data quality ===
-    flagged_fraction: Annotated[float, Field(default=0.0, ge=0.0, le=1.0), FieldMeta(display_name="Flagged Fraction")]
-    flag_summary_by_antenna: Annotated[dict[str, float] | None, Field(default=None), FieldMeta(display_name="Flag Summary by Antenna")]
+    flagged_fraction: Annotated[float, Field(default=0.0, ge=0.0, le=1.0)]
+    flag_summary_by_antenna: Annotated[dict[str, float] | None, Field(default=None)]
 
     # === UV coverage ===
-    baseline_lengths: Annotated[tuple[float, float] | None, Field(default=None), FieldMeta(display_name="Baseline Lengths")]
-    uv_range: Annotated[tuple[float, float] | None, Field(default=None), FieldMeta(display_name="UV Range")]
+    baseline_lengths: Annotated[tuple[float, float] | None, Field(default=None)]
+    uv_range: Annotated[tuple[float, float] | None, Field(default=None)]
 
     # === Scan / State ===
-    number_of_scans: Annotated[int | None, Field(default=None, ge=0), FieldMeta(display_name="Number of Scans")]
-    scan_intents: Annotated[list[str], Field(default_factory=list), FieldMeta(display_name="Scan Intents")]
-    state_ids: Annotated[list[int], Field(default_factory=list), FieldMeta(display_name="State IDs")]
+    number_of_scans: Annotated[int | None, Field(default=None, ge=0)]
+    scan_intents: Annotated[list[str], Field(default_factory=list)]
+    state_ids: Annotated[list[int], Field(default_factory=list)]
 
     # === File info ===
-    size_on_disk_mb: Annotated[float | None, Field(default=None, ge=0.0), FieldMeta(display_name="Size on Disk (MB)")]
-    creation_date: Annotated[datetime | None, Field(default=None), FieldMeta(display_name="Creation Date")]
-    last_modified: Annotated[datetime | None, Field(default=None), FieldMeta(display_name="Last Modified")]
+    size_on_disk_mb: Annotated[float | None, Field(default=None, ge=0.0)]
+    creation_date: Annotated[datetime | None, Field(default=None)]
+    last_modified: Annotated[datetime | None, Field(default=None)]
 
     # === Software ===
-    casa_version: Annotated[str | None, Field(default=None), FieldMeta(display_name="CASA Version")]
-    history_summary: Annotated[list[str], Field(default_factory=list), FieldMeta(display_name="History Summary")]
+    casa_version: Annotated[str | None, Field(default=None)]
+    history_summary: Annotated[list[str], Field(default_factory=list)]
 
     # -- Validators --
 
@@ -431,34 +414,50 @@ class MSInfo(_BoepieModel):
             "nonzero_data_columns": self.nonzero_data_columns,
             "data_column_info": self.data_column_info,
             "size_mb": self.size_on_disk_mb,
-            "flagged_fraction": f"{self.flagged_fraction:.1%}",
+            "flagged_fraction": self.flagged_fraction,
         }
 
-    def to_markdown(self, sections: list[str] | None = None) -> str:
-        """Render selected display groups as markdown.
+    def to_report(self, sections: list[str] | None = None, title: str | None = None) -> str:
+        """Render selected display groups as an F3 key/value report.
 
-        ``sections`` is a list of group keys (see ``__display_groups__``).
-        ``None`` renders all groups.
+        ``sections`` is a list of group keys (see ``__display_groups__``);
+        ``None`` renders every group. ``title`` overrides the header line
+        (defaults to the absolute MS path) so a caller can echo back the
+        path the way it was given instead of the resolved absolute one.
         """
         selected = set(sections) if sections else None
-        lines: list[str] = [f"# MeasurementSet: `{self.path.name}`", ""]
+        lines: list[str] = [f"# {title if title is not None else self.path}"]
 
+        first_group = True
         for group in self.__display_groups__:
             if selected is not None and group["key"] not in selected:
                 continue
-            lines.append(f"## {group['title']}")
+            rows: list[str] = []
             for field_name in group["fields"]:
                 rendered = self._render_field(field_name)
                 if rendered is None:
                     continue
-                lines.append(f"- **{self._display_name(field_name)}**: {rendered}")
-            lines.append("")
+                rows.append(f"{field_name}: {rendered}")
+            if not rows:
+                continue
+            if not first_group:
+                lines.append("")
+            first_group = False
+            lines.append(group["key"])
+            lines.extend(rows)
 
-        return "\n".join(lines).rstrip() + "\n"
+        return "\n".join(lines) + "\n"
 
-    def _display_name(self, field_name: str) -> str:
-        meta = self.field_metadata().get(field_name)
-        return meta.display_name if meta else field_name.replace("_", " ").title()
+    def summary_report(self, title: str | None = None) -> str:
+        """Render :meth:`summary` as a flat F3 key/value report."""
+        lines: list[str] = [f"# {title if title is not None else self.path}"]
+        for key, value in self.summary().items():
+            if key == "path":
+                continue  # already the title line
+            formatter = _FIELD_FORMATTERS.get(key)
+            rendered = formatter(value) if formatter is not None and value is not None else _format_generic(value)
+            lines.append(f"{key}: {rendered if rendered is not None else 'null'}")
+        return "\n".join(lines) + "\n"
 
     def _render_field(self, field_name: str) -> str | None:
         value = getattr(self, field_name, None)

@@ -13,21 +13,43 @@ wheels/
 .vscode/
 .idea/
 
+# Local untracked archive - scratch for out-of-place files, sorted manually
+/archive/
+
+# Internal design notes - kept local to this working copy, not shipped or merged.
+/design/
+
+# Build artefact in *this* repo: `boepie knowledge apply` regenerates it from
+# src/boepie/knowledge/content/, which is the tracked source of truth. Says
+# nothing about user projects, where a .boepie/ bundle IS meant to be committed.
+/.boepie/
+
+# Source corpora. Reproducible upstream (scripts/docs_to_md.py) or from the PDF
+# pipeline, and published as built index assets on the release, so they are not
+# carried in git. See design/open-items.md for what that costs (corpus.bib).
+/stimela-corpus/
+/docs-corpus/
+
 # Local data
 data/
 traces/
 logs/
-cabs/
+# Root-level stimela/cultcargo cab cache only - anchored so it does NOT match
+# the knowledge bundle's own cabs/ dirs (.boepie/cabs/, knowledge/content/cabs/).
+/cabs/
 
-# ChromaDB vector store (rebuilt from sources)
-chroma_data/
-
-# Source documents for RAG indexing (user-provided, not shipped)
-sources/
+# Built search indices (rebuilt from the corpus via `boepie index`)
+.index/
 
 # Stimela artefacts
 stimela.config.deps
 *.stimela.cache
+
+# Stimela / imaging run outputs (produced by running recipes in-tree)
+*.fits
+*.qc/
+log-stimela.txt
+image-sources.txt
 
 # Environment / secrets
 .env

@@ -1,6 +1,6 @@
-"""Tests for the knowledge MCP tools: list_cabs, get_cab_docs, get_cab_schema, query_cab_params.
+"""Tests for the cab MCP tools: list_cabs, get_cab_docs, get_cab_schema, get_cab_params.
 
-All tests run in-process via FastMCP's Client transport — no network, no subprocess.
+All tests run in-process via FastMCP's Client transport - no network, no subprocess.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ def _text(result: object) -> str:
 async def test_list_cabs_returns_csv_with_all_cabs(boepie_client: Client[FastMCPTransport]):
     result = await boepie_client.call_tool("list_cabs", {})
     text = _text(result)
-    assert "# Showing" in text
+    assert "# showing" in text
     assert "cab,description" in text
 
 
@@ -39,7 +39,7 @@ async def test_list_cabs_count_header_matches_rows(
     text = _text(result)
     lines = [line for line in text.splitlines() if not line.startswith("#")]
     data_rows = lines[1:]
-    count_line = next(line for line in text.splitlines() if line.startswith("# Showing"))
+    count_line = next(line for line in text.splitlines() if line.startswith("# showing"))
     shown = int(count_line.split()[2])
     assert shown == len(data_rows)
     assert shown == len(all_cab_names)
@@ -198,7 +198,7 @@ async def test_get_cab_docs_nonexistent_param_filter_returns_cab_header_only(
         {"input": {"cab_name": "wsclean", "params": ["zzz_no_such_param"]}},
     )
     text = _text(result)
-    # No error — just the cab name with no parameters listed
+    # No error - just the cab name with no parameters listed
     assert not text.startswith("Error:")
     assert "wsclean" in text
     assert "zzz_no_such_param" not in text
@@ -269,15 +269,20 @@ async def test_get_cab_schema_required_params_include_writable_column(
 
 
 # ---------------------------------------------------------------------------
-# query_cab_params
+# get_cab_params
 # ---------------------------------------------------------------------------
 
 
-async def test_query_cab_params_returns_csv_with_identifier_columns(
+def _csv_lines(text: str) -> list[str]:
+    """Strip '#' comment lines (error lines, count line), keep header + data rows."""
+    return [line for line in text.splitlines() if line and not line.startswith("#")]
+
+
+async def test_get_cab_params_returns_csv_with_identifier_columns(
     boepie_client: Client[FastMCPTransport],
 ):
     result = await boepie_client.call_tool(
-        "query_cab_params",
+        "get_cab_params",
         {
             "input": {
                 "fields": ["dtype", "required"],
@@ -286,17 +291,32 @@ async def test_query_cab_params_returns_csv_with_identifier_columns(
         },
     )
     text = _text(result)
-    header = text.splitlines()[0]
+    header = _csv_lines(text)[0]
     assert header.startswith("cab,section,param")
     assert "dtype" in header
     assert "required" in header
 
 
-async def test_query_cab_params_empty_fields_returns_all_available_columns(
+async def test_get_cab_params_count_line_present(boepie_client: Client[FastMCPTransport]):
+    result = await boepie_client.call_tool(
+        "get_cab_params",
+        {
+            "input": {
+                "fields": ["dtype"],
+                "cabs": {"wsclean": {"section": "inputs", "params": ["niter"]}},
+            }
+        },
+    )
+    text = _text(result)
+    count_line = next(line for line in text.splitlines() if line.startswith("# showing"))
+    assert "1 params across 1 cabs" in count_line
+
+
+async def test_get_cab_params_empty_fields_returns_all_available_columns(
     boepie_client: Client[FastMCPTransport],
 ):
     result = await boepie_client.call_tool(
-        "query_cab_params",
+        "get_cab_params",
         {
             "input": {
                 "fields": [],
@@ -305,18 +325,18 @@ async def test_query_cab_params_empty_fields_returns_all_available_columns(
         },
     )
     text = _text(result)
-    header = text.splitlines()[0]
+    header = _csv_lines(text)[0]
     for field in ("dtype", "info", "required", "default", "choices", "writable"):
         assert field in header
 
 
-async def test_query_cab_params_data_row_contains_correct_cab_and_param(
+async def test_get_cab_params_data_row_contains_correct_cab_and_param(
     boepie_client: Client[FastMCPTransport],
     wsclean_optional_input_names: list[str],
 ):
     param = wsclean_optional_input_names[0]
     result = await boepie_client.call_tool(
-        "query_cab_params",
+        "get_cab_params",
         {
             "input": {
                 "fields": ["dtype"],
@@ -325,17 +345,17 @@ async def test_query_cab_params_data_row_contains_correct_cab_and_param(
         },
     )
     text = _text(result)
-    lines = text.strip().splitlines()
+    lines = _csv_lines(text)
     assert len(lines) == 2  # header + one data row
     assert lines[1].startswith(f"wsclean,inputs,{param}")
 
 
-async def test_query_cab_params_wildcard_returns_multiple_rows(
+async def test_get_cab_params_wildcard_returns_multiple_rows(
     boepie_client: Client[FastMCPTransport],
     wsclean_schema: CabSchema,
 ):
     result = await boepie_client.call_tool(
-        "query_cab_params",
+        "get_cab_params",
         {
             "input": {
                 "fields": ["dtype"],
@@ -344,15 +364,15 @@ async def test_query_cab_params_wildcard_returns_multiple_rows(
         },
     )
     text = _text(result)
-    data_rows = text.strip().splitlines()[1:]  # skip header
+    data_rows = _csv_lines(text)[1:]  # skip header
     assert len(data_rows) == len(wsclean_schema.inputs)
 
 
-async def test_query_cab_params_no_match_pattern_produces_header_only(
+async def test_get_cab_params_no_match_pattern_produces_header_only(
     boepie_client: Client[FastMCPTransport],
 ):
     result = await boepie_client.call_tool(
-        "query_cab_params",
+        "get_cab_params",
         {
             "input": {
                 "fields": ["dtype"],
@@ -361,16 +381,18 @@ async def test_query_cab_params_no_match_pattern_produces_header_only(
         },
     )
     text = _text(result)
-    lines = text.strip().splitlines()
+    lines = _csv_lines(text)
     assert len(lines) == 1
     assert lines[0].startswith("cab,section,param")
+    count_line = next(line for line in text.splitlines() if line.startswith("# showing"))
+    assert "0 params across 0 cabs" in count_line
 
 
-async def test_query_cab_params_bad_cab_produces_error_row(
+async def test_get_cab_params_bad_cab_produces_error_line_not_column(
     boepie_client: Client[FastMCPTransport],
 ):
     result = await boepie_client.call_tool(
-        "query_cab_params",
+        "get_cab_params",
         {
             "input": {
                 "fields": ["dtype"],
@@ -379,15 +401,18 @@ async def test_query_cab_params_bad_cab_produces_error_row(
         },
     )
     text = _text(result)
-    assert "error" in text
-    assert "not_a_real_cab" in text
+    error_line = next(line for line in text.splitlines() if line.startswith("# error"))
+    assert "not_a_real_cab" in error_line
+    # No phantom 'error' CSV column when every cab failed.
+    header = _csv_lines(text)[0]
+    assert "error" not in header.split(",")
 
 
-async def test_query_cab_params_bad_cab_mixed_with_good_cab(
+async def test_get_cab_params_bad_cab_mixed_with_good_cab(
     boepie_client: Client[FastMCPTransport],
 ):
     result = await boepie_client.call_tool(
-        "query_cab_params",
+        "get_cab_params",
         {
             "input": {
                 "fields": ["dtype"],
@@ -399,14 +424,16 @@ async def test_query_cab_params_bad_cab_mixed_with_good_cab(
         },
     )
     text = _text(result)
-    # Good cab row present
-    assert "wsclean" in text
-    # Bad cab error row present
-    assert "not_a_real_cab" in text
-    assert "error" in text
+    # Bad cab reported on its own error line, not mixed into the CSV.
+    error_line = next(line for line in text.splitlines() if line.startswith("# error"))
+    assert "not_a_real_cab" in error_line
+    # Good cab's row still present in the table.
+    data_rows = _csv_lines(text)[1:]
+    assert any(row.startswith("wsclean,inputs,niter") for row in data_rows)
+    assert not any("not_a_real_cab" in row for row in data_rows)
 
 
-async def test_query_cab_params_multiple_patterns_deduplicated(
+async def test_get_cab_params_multiple_patterns_deduplicated(
     boepie_client: Client[FastMCPTransport],
     wsclean_optional_input_names: list[str],
 ):
@@ -414,7 +441,7 @@ async def test_query_cab_params_multiple_patterns_deduplicated(
     param = wsclean_optional_input_names[0]
     prefix_pattern = param[0] + "*"
     result = await boepie_client.call_tool(
-        "query_cab_params",
+        "get_cab_params",
         {
             "input": {
                 "fields": ["dtype"],
@@ -424,7 +451,7 @@ async def test_query_cab_params_multiple_patterns_deduplicated(
     )
     text = _text(result)
     data_rows = [
-        line for line in text.strip().splitlines()[1:]
+        line for line in _csv_lines(text)[1:]
         if line.startswith(f"wsclean,inputs,{param},")
     ]
     assert len(data_rows) == 1

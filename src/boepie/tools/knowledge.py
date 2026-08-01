@@ -1,234 +1,90 @@
-"""MCP tools for querying stimela cab definitions and documentation.
+"""MCP tool for locating relevant pages in the curated ``.boepie/`` bundle.
 
-These tools let the AI discover what software is available through
-cult-cargo and inspect their parameters via ``stimela doc``.
+One tool over the generic ``boepie.rag`` engine, pinned to the ``knowledge``
+collection, which is always built lexical-only (BM25, no embedding backend -
+see ``rag.engine``'s ``embedding=None`` mode). There is deliberately no
+``read_knowledge``: hits are bundle file paths the agent opens with its own
+file tools, so each hit's ``source:`` line is the handle.
+
+The index searched is the one *inside* the bundle that governs the working
+directory (``find_bundle`` -> ``index_root_for``), resolved per call rather
+than at import: the server is long-lived, its cwd is wherever the client
+launched it, and a project's bundle may be created after it starts. Set
+``BOEPIE_BUNDLE_DIR`` when the two cannot be made to coincide.
 """
 
 from __future__ import annotations
 
-import fnmatch
-from typing import Any, Literal
+from pathlib import Path
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from boepie.runner import CabParam, list_cabs_with_info, load_cab_schema
-from boepie.utilities import write_csv
+from boepie.knowledge import find_bundle, index_root_for
+from boepie.rag import search
+from boepie.tools._retrieval import (
+    SNIPPET_DESCRIPTION,
+    TOP_K_DESCRIPTION,
+    VIEWS,
+    Snippet,
+    format_hits,
+    one_line,
+)
+
+_COLLECTION = "knowledge"
+_VIEW = VIEWS[_COLLECTION]
 
 
-# Canonical field order for query_cab_params output.
-_AVAILABLE_FIELDS: list[str] = [
-    "dtype", "info", "required", "default", "choices", "writable", "examples",
-]
+class SearchKnowledgeInput(BaseModel):
+    question: str = Field(
+        description="Natural-language query, e.g. 'how does substitution work in a recipe?'."
+    )
+    top_k: int = Field(default=5, ge=1, le=20, description=TOP_K_DESCRIPTION)
+    snippet: Snippet = Field(default="short", description=SNIPPET_DESCRIPTION)
 
 
-def list_cabs(pattern: str | None = None) -> str:
-    """List available cab (containerised application bundle) definitions.
+async def search_knowledge(input: SearchKnowledgeInput) -> str:
+    """Locate pages in the curated .boepie/ knowledge bundle for a question.
 
-    Returns a CSV table with ``cab`` and ``description`` columns for every
-    tool available through cult-cargo. Use this to discover what tools are
-    available before building a recipe.
+    Reach for this for pipeline strategy, recipe-language concepts, and
+    "what does this cab do and when do I reach for it" notes. Never for
+    parameter values, defaults or choices - those come only from the cab tools,
+    which read the installed cult-cargo version and never go stale.
 
-    Parameters
-    ----------
-    pattern:
-        Optional fnmatch-style pattern to narrow results (e.g. ``casa.*``,
-        ``*clean*``, ``wsclean``). If omitted, all cabs are returned.
+    Returns locations, not answers: each hit's source line is a bundle file
+    path to open with your own file-reading tools. BM25 lexical search only, so
+    try another phrasing if a query comes back thin.
     """
-    all_cabs = list_cabs_with_info()
-    if not all_cabs:
-        return "No cab definitions found. Is cult-cargo installed?"
+    bundle_dir = find_bundle()
+    if bundle_dir is None:
+        return (
+            f"Error: no .boepie/ bundle found in {Path.cwd()} or any parent. "
+            "Run 'boepie knowledge init'."
+        )
 
-    if pattern:
-        all_cabs = [row for row in all_cabs if fnmatch.fnmatch(row["cab"], pattern)]
-        if not all_cabs:
-            return f"No cabs match the pattern '{pattern}'."
-
-    total = len(list_cabs_with_info()) if pattern else len(all_cabs)
-    header = f"# Showing {len(all_cabs)} of {total} cabs\n"
-    return header + write_csv(all_cabs, ["cab", "description"])
-
-
-class GetCabDocsInput(BaseModel):
-    cab_name: str
-    params: list[str] | None = None
-
-
-def get_cab_docs(input: GetCabDocsInput) -> str:
-    """Get full parameter documentation for a specific cab.
-
-    Returns a detailed text summary of the cab's inputs and outputs,
-    including descriptions, defaults and choices. Use this when you are
-    learning a new tool. For quick name/type confirmation, use
-    ``get_cab_schema`` instead.
-
-    Supply ``params`` to restrict the output to specific parameters when you
-    only have a few uncertainties and don't need the full cab docs.
-
-    Parameters
-    ----------
-    input.cab_name:
-        Name of the cab (e.g. "wsclean", "quartical", "casa.bandpass").
-        Use ``list_cabs`` first to see available names.
-    input.params:
-        Optional list of parameter names to show (e.g. ["niter", "auto-threshold"]).
-        If omitted, docs for all parameters are returned.
-    """
     try:
-        schema = load_cab_schema(input.cab_name)
+        results = await search(
+            input.question,
+            collection=_COLLECTION,
+            top_k=input.top_k,
+            mode="bm25",
+            index_root=index_root_for(bundle_dir),
+            embedding=None,
+        )
+    except FileNotFoundError:
+        return (
+            f"Error: bundle {bundle_dir} has no search index. "
+            "Run 'boepie knowledge apply'."
+        )
     except ValueError as error:
-        return f"Error: {error}"
+        return f"Error: {one_line(error)}"
 
-    if input.params is not None:
-        params_set = set(input.params)
-        schema = schema.model_copy(update={
-            "inputs": {name: param for name, param in schema.inputs.items() if name in params_set},
-            "outputs": {name: param for name, param in schema.outputs.items() if name in params_set},
-        })
-
-    return schema.to_compact()
-
-
-class GetCabSchemaInput(BaseModel):
-    cab_name: str
-    section: Literal["inputs", "outputs", "all"] = "all"
-
-
-def get_cab_schema(input: GetCabSchemaInput) -> str:
-    """Get a compact CSV schema for a cab showing parameter names, types, and flags.
-
-    Required inputs are listed first with ``param,dtype,writable`` columns, followed
-    by optional inputs with ``param,dtype`` columns, then outputs with ``param,dtype``.
-    No descriptions, defaults, or choices are included - use ``get_cab_docs`` for those.
-
-    Use the ``section`` field to limit output to ``inputs``, ``outputs``, or ``all``
-    (default). Useful when you only need to check one side.
-
-    Parameters
-    ----------
-    input.cab_name:
-        Name of the cab (e.g. "wsclean", "quartical", "casa.bandpass").
-    input.section:
-        Which sections to include - "inputs", "outputs", or "all" (default).
-    """
-    try:
-        schema = load_cab_schema(input.cab_name)
-    except ValueError as error:
-        return f"Error: {error}"
-
-    parts: list[str] = []
-
-    if input.section in ("inputs", "all"):
-        required = [(name, param) for name, param in schema.inputs.items() if param.required]
-        optional = [(name, param) for name, param in schema.inputs.items() if not param.required]
-
-        if required:
-            parts.append(f"# {input.cab_name} inputs")
-            parts.append(write_csv(
-                [{"param": name, "dtype": param.dtype, "writable": str(param.writable).lower()} for name, param in required],
-                ["param", "dtype", "writable"],
-            ))
-
-        if optional:
-            parts.append("# optional")
-            parts.append(write_csv(
-                [{"param": name, "dtype": param.dtype} for name, param in optional],
-                ["param", "dtype"],
-            ))
-
-    if input.section in ("outputs", "all") and schema.outputs:
-        parts.append(f"# {input.cab_name} outputs")
-        parts.append(write_csv(
-            [{"param": name, "dtype": param.dtype} for name, param in schema.outputs.items()],
-            ["param", "dtype"],
-        ))
-
-    return "\n".join(parts)
-
-
-class CabParamSpec(BaseModel):
-    section: Literal["inputs", "outputs"] = "inputs"
-    params: list[str]
-    """Parameter names or fnmatch patterns (e.g. ["*", "*freq*", "niter"])."""
-
-
-class QueryCabParamsInput(BaseModel):
-    fields: list[Literal["dtype", "info", "required", "default", "choices", "writable", "examples"]] = []
-    """Fields to return for every matched parameter. Empty means all fields."""
-    cabs: dict[str, CabParamSpec]
-
-
-def _param_field_value(param: CabParam, field: str) -> str:
-    """Return a string-serialised value for one field of a CabParam."""
-    if field == "dtype":
-        return param.dtype or "null"
-    if field == "info":
-        return param.info or "null"
-    if field == "required":
-        return str(param.required).lower()
-    if field == "default":
-        return str(param.default) if param.default is not None else "null"
-    if field == "choices":
-        return ";".join(param.choices) if param.choices else "null"
-    if field == "writable":
-        return str(param.writable).lower()
-    # examples: not present on cab params
-    return "null"
-
-
-def query_cab_params(input: QueryCabParamsInput) -> str:
-    """Batch lookup of parameter fields across one or more cabs.
-
-    Supply a shared ``fields`` list and a ``cabs`` dict mapping each cab name
-    to its section and a list of parameter name patterns. Patterns follow
-    fnmatch syntax - use ``["*"]`` for all params, ``["*freq*", "*mem*"]`` for
-    params whose names contain "freq" or "mem".
-
-    Available fields: dtype, info, required, default, choices, writable, examples
-    If ``fields`` is empty, all available fields are returned.
-
-    Returns a single CSV table with ``cab``, ``section``, ``param`` as identifier
-    columns followed by the requested fields. A bad cab name produces an error
-    row for that cab; patterns that match nothing are silently skipped.
-
-    Example input:
-      fields: ["dtype", "default", "choices"]
-      cabs:
-        wsclean:         {section: mcp.run("stdio")inputs,  params: ["ms", "niter", "auto-threshold"]}
-        msutils.renamecol: {section: outputs, params: ["dds-out"]}
-        casa.bandpass:   {section: inputs,  params: ["*"]}
-    """
-    field_columns = [f for f in _AVAILABLE_FIELDS if not input.fields or f in set(input.fields)]
-    columns = ["cab", "section", "param"] + field_columns
-
-    rows: list[dict[str, Any]] = []
-    has_error = False
-
-    for cab_name, spec in input.cabs.items():
-        try:
-            schema = load_cab_schema(cab_name)
-        except ValueError as error:
-            rows.append({"cab": cab_name, "section": spec.section, "param": "", "error": str(error)})
-            has_error = True
-            continue
-
-        param_pool = schema.inputs if spec.section == "inputs" else schema.outputs
-
-        # Expand fnmatch patterns, preserving schema order and deduplicating.
-        seen: set[str] = set()
-        matched: list[str] = []
-        for pattern in spec.params:
-            for param_name in fnmatch.filter(param_pool.keys(), pattern):
-                if param_name not in seen:
-                    matched.append(param_name)
-                    seen.add(param_name)
-
-        for param_name in matched:
-            row: dict[str, Any] = {"cab": cab_name, "section": spec.section, "param": param_name}
-            for field in field_columns:
-                row[field] = _param_field_value(param_pool[param_name], field)
-            rows.append(row)
-
-    if has_error:
-        columns.append("error")
-
-    return write_csv(rows, columns)
+    return format_hits(
+        input.question,
+        _COLLECTION,
+        results,
+        snippet=input.snippet,
+        title_of=_VIEW.title_of,
+        source_root=_VIEW.source_root,
+        keep_source_root=_VIEW.keep_source_root,
+        read_handles=_VIEW.read_handles,
+    )

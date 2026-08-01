@@ -3,21 +3,42 @@
 These tools let the AI validate generated YAML recipes via
 ``stimela run --dry-run`` and execute them when ready. Both tools pass
 ``-B`` / ``--boring`` to stimela so captured output is free of ANSI/Rich
-markup, and they return log file paths instead of forwarding full log
-content through MCP. Call sites should use the Read tool on the reported
-paths whenever they need more detail than the inline tail provides.
+markup, and ``runner.stimela_run`` sets a wide ``COLUMNS`` in the child
+environment so stimela's rich-based formatter does not wrap long lines
+(file paths above all) mid-token - it wraps to the console width
+regardless of TTY or boring mode. ``_clean_lines`` still strips the
+trailing whitespace padding rich adds to fill each line out to that width.
+
+Both tools return log file paths instead of forwarding full log content
+through MCP. Call sites should use the Read tool on the reported paths
+whenever they need more detail than the inline tail provides.
 """
 
 from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+from typing import Literal
+
+from pydantic import BaseModel, Field, model_validator
 
 from boepie.runner import find_recipe_logs, stimela_run
 
 
 _SUCCESS_TAIL_LINES = 20
 _ERROR_TAIL_LINES = 40
+
+# What `stimela run --dry-run` was empirically verified to catch (unknown cab
+# names, unknown parameter names, missing required parameters - all raised as
+# a pre-validation error before any step runs) versus what it does not (a
+# dry run exits immediately after pre-validation, before ever touching input
+# files or resolving `{substitution}` expressions). A caller reading a bare
+# "valid" would otherwise be tempted to execute on the strength of a check
+# that never happened.
+_SCHEMA_OK_CHECKED = "checked: cab names, parameter names, required parameters"
+_SCHEMA_OK_NOT_CHECKED = (
+    "not checked: input file existence, {substitution} resolvability, container availability"
+)
 
 
 def _clean_lines(text: str) -> list[str]:
@@ -43,165 +64,178 @@ def _tail(text: str, max_lines: int) -> str:
 
 
 def _format_log_paths(log_paths: list[Path]) -> str:
-    """Format a list of log file paths for inclusion in an MCP response."""
+    """Format a list of log file paths for inclusion in an MCP response.
+
+    Kept absolute (not relative to cwd): these are meant to be fed straight
+    to the Read tool, and the server's cwd is not guaranteed to match the
+    caller's working directory, so a relative path here could resolve to the
+    wrong file or nothing at all.
+    """
     if not log_paths:
-        return "Log files: (none found in recipe directory)"
-    lines = ["Log files (use the Read tool to fetch full content):"]
+        return "log files: none found in recipe directory"
+    lines = ["log files (use the Read tool for full content):"]
     for path in log_paths:
         lines.append(f"  {path}")
     return "\n".join(lines)
 
 
-def validate_recipe(
-    recipe_path: str = "",
-    yaml_content: str = "",
-    recipe_name: str = "",
-) -> str:
+class ValidateRecipeInput(BaseModel):
+    recipe_path: str = Field(
+        default="",
+        description=(
+            "Path to an existing recipe YAML file to validate in place. Preferred as "
+            "soon as the recipe grows past a handful of lines."
+        ),
+    )
+    yaml_content: str = Field(
+        default="",
+        description="Inline YAML content, written to a temp file before validation. Use only for tiny recipes.",
+    )
+    recipe_name: str = Field(
+        default="", description="Recipe name to select, if the file defines more than one."
+    )
+
+    @model_validator(mode="after")
+    def _exactly_one_source(self) -> "ValidateRecipeInput":
+        if bool(self.recipe_path) == bool(self.yaml_content):
+            raise ValueError("Provide exactly one of 'recipe_path' or 'yaml_content'.")
+        return self
+
+
+def validate_recipe(input: ValidateRecipeInput) -> str:
     """Validate a stimela recipe via ``stimela run --dry-run``.
 
-    Provide exactly one of ``recipe_path`` or ``yaml_content``.
-
-    Prefer ``recipe_path`` as soon as the recipe grows past a handful of
-    lines: write the YAML to a file once and pass the path, so the full
-    content does not have to travel through the MCP message stream on
-    every validation call. Reserve ``yaml_content`` for tiny inline
-    snippets where writing to disk first is not worth the round-trip.
-
-    On success the response is ``VALID`` followed by a tail of the dry-run
-    output. On failure it is ``INVALID`` followed by an error tail. When a
-    real ``recipe_path`` was supplied, the response also lists the log
-    files stimela wrote alongside the recipe. Use the Read tool on those
-    paths when you need the full per-step log content; do not ask for it
-    to be inlined into the response.
-
-    Parameters
-    ----------
-    recipe_path:
-        Path to an existing recipe YAML file to validate in place.
-        Preferred for anything non-trivial.
-    yaml_content:
-        Inline YAML content. Written to a temporary file before validation.
-        Use only for very small recipes.
-    recipe_name:
-        Optional recipe name if the file defines multiple recipes.
+    Checks cab names, parameter names, and required parameters. Does not
+    check input file existence, ``{substitution}`` resolvability, or
+    container availability - see the ``not checked`` line in the response.
+    Use the Read tool on any reported log paths for full per-step detail.
     """
-    if bool(recipe_path) == bool(yaml_content):
-        return "Error: provide exactly one of 'recipe_path' or 'yaml_content'."
-
-    if recipe_path:
-        resolved_path = Path(recipe_path)
+    if input.recipe_path:
+        given_path = input.recipe_path
+        resolved_path = Path(given_path)
         if not resolved_path.is_file():
-            return f"Error: recipe file not found: {recipe_path}"
+            return f"Error: recipe file not found: {given_path}. Check the path and try again."
 
         yaml_path = resolved_path.resolve()
         log_dir = yaml_path.parent
 
         result = stimela_run(
             recipe_yml=str(yaml_path),
-            recipe_name=recipe_name,
+            recipe_name=input.recipe_name,
             dry_run=True,
             cwd=str(log_dir),
         )
         log_paths = find_recipe_logs(log_dir)
 
         if result.ok:
-            return (
-                f"VALID\n\n"
-                f"Recipe: {yaml_path}\n\n"
-                f"{_format_log_paths(log_paths)}\n\n"
-                f"Output tail:\n{_tail(result.stdout, _SUCCESS_TAIL_LINES)}"
-            )
+            return "\n".join([
+                "SCHEMA-OK",
+                f"recipe: {given_path}",
+                _SCHEMA_OK_CHECKED,
+                _SCHEMA_OK_NOT_CHECKED,
+                "",
+                _format_log_paths(log_paths),
+                "",
+                f"Output tail:\n{_tail(result.stdout, _SUCCESS_TAIL_LINES)}",
+            ])
         error_body = result.stderr or result.stdout
-        return (
-            f"INVALID (exit code {result.returncode})\n\n"
-            f"Recipe: {yaml_path}\n\n"
-            f"Error tail:\n{_tail(error_body, _ERROR_TAIL_LINES)}\n\n"
-            f"{_format_log_paths(log_paths)}"
-        )
+        return "\n".join([
+            f"FAILED (exit code {result.returncode})",
+            f"recipe: {given_path}",
+            "",
+            f"Error tail:\n{_tail(error_body, _ERROR_TAIL_LINES)}",
+            "",
+            _format_log_paths(log_paths),
+        ])
 
-    # yaml_content mode: use a temp dir so the log files stimela emits
-    # land beside the temporary recipe instead of polluting the caller's
-    # working directory. The directory is cleaned up on exit, so the log
-    # content is embedded inline (it is already clean thanks to --boring).
+    # yaml_content mode: use a temp dir so the log files stimela emits land
+    # beside the temporary recipe instead of polluting the caller's working
+    # directory. The directory is cleaned up on exit, so there are no log
+    # paths to report - the output is already clean thanks to --boring.
     with tempfile.TemporaryDirectory(prefix="boepie-validate-") as temp_dir:
         temp_recipe = Path(temp_dir) / "recipe.yml"
-        temp_recipe.write_text(yaml_content)
+        temp_recipe.write_text(input.yaml_content)
         result = stimela_run(
             recipe_yml=str(temp_recipe),
-            recipe_name=recipe_name,
+            recipe_name=input.recipe_name,
             dry_run=True,
             cwd=temp_dir,
         )
+        recipe_lines = [f"recipe: {input.recipe_name}"] if input.recipe_name else []
         if result.ok:
-            return f"VALID\n\n{_clean(result.stdout)}"
+            return "\n".join([
+                "SCHEMA-OK",
+                *recipe_lines,
+                _SCHEMA_OK_CHECKED,
+                _SCHEMA_OK_NOT_CHECKED,
+                "",
+                _clean(result.stdout),
+            ])
         error_body = result.stderr or result.stdout
-        return (
-            f"INVALID (exit code {result.returncode})\n\n"
-            f"{_clean(error_body)}"
-        )
+        return "\n".join([
+            f"FAILED (exit code {result.returncode})",
+            *recipe_lines,
+            "",
+            _clean(error_body),
+        ])
 
 
-def run_recipe(
-    recipe_path: str,
-    recipe_name: str = "",
-    params: dict[str, str] | None = None,
-    backend: str = "native",
-) -> str:
+class RunRecipeInput(BaseModel):
+    recipe_path: str = Field(description="Path to the recipe YAML file on disk.")
+    recipe_name: str = Field(
+        default="", description="Recipe name to select, if the file defines more than one."
+    )
+    params: dict[str, str] | None = Field(
+        default=None, description="Parameter overrides as key=value pairs."
+    )
+    backend: Literal["native", "singularity", "kube"] = Field(
+        default="native", description="Execution backend."
+    )
+
+
+def run_recipe(input: RunRecipeInput) -> str:
     """Execute a stimela recipe from a YAML file.
 
-    Runs ``stimela run`` on an existing recipe file with clean/boring
-    output mode. Use ``validate_recipe`` first to check for config errors.
-
-    On success the response is ``SUCCESS`` followed by a tail of stdout
-    and the list of log files stimela wrote beside the recipe. On failure
-    it is ``FAILED`` followed by an error tail and the same log paths.
-    Use the Read tool on the reported log paths when you need the full
-    per-step execution log: the inline tail is intentionally short to
-    keep MCP responses token-efficient.
-
-    No timeout is enforced, since real pipelines can run for hours.
-
-    Parameters
-    ----------
-    recipe_path:
-        Path to the recipe YAML file on disk.
-    recipe_name:
-        Optional recipe name if the file defines multiple recipes.
-    params:
-        Optional parameter overrides as key=value pairs.
-    backend:
-        Backend to use: "native", "singularity", or "kube".
+    Call ``validate_recipe`` first to catch cab/parameter/config errors
+    before spending time on execution. No timeout is enforced, since real
+    pipelines can run for hours. Use the Read tool on any reported log
+    paths for full per-step detail.
     """
-    path = Path(recipe_path)
+    given_path = input.recipe_path
+    path = Path(given_path)
     if not path.is_file():
-        return f"Error: recipe file not found: {recipe_path}"
+        return f"Error: recipe file not found: {given_path}. Check the path and try again."
 
     resolved = path.resolve()
     log_dir = resolved.parent
 
     result = stimela_run(
         recipe_yml=str(resolved),
-        recipe_name=recipe_name,
-        params=params,
-        backend=backend,
+        recipe_name=input.recipe_name,
+        params=input.params,
+        backend=input.backend,
         cwd=str(log_dir),
         timeout=None,
     )
     log_paths = find_recipe_logs(log_dir)
 
     if result.ok:
-        return (
-            f"SUCCESS\n\n"
-            f"Recipe: {resolved}\n"
-            f"Backend: {backend}\n\n"
-            f"{_format_log_paths(log_paths)}\n\n"
-            f"Output tail:\n{_tail(result.stdout, _SUCCESS_TAIL_LINES)}"
-        )
+        return "\n".join([
+            "OK",
+            f"recipe: {given_path}",
+            f"backend: {input.backend}",
+            "",
+            _format_log_paths(log_paths),
+            "",
+            f"Output tail:\n{_tail(result.stdout, _SUCCESS_TAIL_LINES)}",
+        ])
     error_body = result.stderr or result.stdout
-    return (
-        f"FAILED (exit code {result.returncode})\n\n"
-        f"Recipe: {resolved}\n"
-        f"Backend: {backend}\n\n"
-        f"Error tail:\n{_tail(error_body, _ERROR_TAIL_LINES)}\n\n"
-        f"{_format_log_paths(log_paths)}"
-    )
+    return "\n".join([
+        f"FAILED (exit code {result.returncode})",
+        f"recipe: {given_path}",
+        f"backend: {input.backend}",
+        "",
+        f"Error tail:\n{_tail(error_body, _ERROR_TAIL_LINES)}",
+        "",
+        _format_log_paths(log_paths),
+    ])

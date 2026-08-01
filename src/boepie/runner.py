@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import functools
 import json
+import os
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -28,6 +29,13 @@ _CULTCARGO_DIR: Path = Path(cultcargo.__file__).parent
 
 # Glob patterns matching cab YAMLs in the order stimela's MANIFEST loads them.
 _CAB_GLOB_PATTERNS: list[str] = ["*.yml", "casa/*.yml"]
+
+# stimela renders its (rich-based) log formatter to this many columns
+# regardless of TTY, wrapping long lines - including file paths - mid-token.
+# Wide enough that no realistic log line wraps; passed via COLUMNS in the
+# child env (see stimela_run). _clean_lines still strips the padding rich
+# adds to fill each line out to this width.
+_WIDE_COLUMNS = "2000"
 
 
 class StimelaType(BaseModel):
@@ -128,17 +136,14 @@ def _run(
     args: list[str],
     timeout: float | None = 300,
     cwd: str | None = None,
+    env: dict[str, str] | None = None,
 ) -> RunResult:
     """Run a command and capture output.
 
-    Parameters
-    ----------
-    args:
-        Full command as a list of strings.
-    timeout:
-        Maximum seconds to wait. None for no limit.
-    cwd:
-        Working directory for the subprocess. None inherits the parent's cwd.
+    ``args`` is the full command. ``timeout`` is the maximum seconds to wait
+    (None for no limit). ``cwd`` is the subprocess working directory (None
+    inherits the parent's). ``env`` replaces the child environment entirely
+    when given (None inherits the parent's).
     """
     proc = subprocess.run(
         args,
@@ -146,6 +151,7 @@ def _run(
         text=True,
         timeout=timeout,
         cwd=cwd,
+        env=env,
     )
     return RunResult(
         command=args,
@@ -422,7 +428,11 @@ def stimela_run(
 
     The ``-B`` / ``--boring`` flag is always passed so captured stdout/stderr
     are free of Rich markup and ANSI escape codes, which keeps token cost low
-    when the output is forwarded through MCP.
+    when the output is forwarded through MCP. ``COLUMNS`` is set wide in the
+    child environment (rich, which stimela's formatter uses, wraps to it
+    regardless of TTY or boring mode) so long lines - file paths above all -
+    are not split mid-token; the trailing padding rich adds up to that width
+    is stripped by the caller.
 
     Parameters
     ----------
@@ -458,4 +468,5 @@ def stimela_run(
         for key, value in params.items():
             cmd.append(f"{key}={value}")
 
-    return _run(cmd, timeout=timeout, cwd=cwd)
+    env = {**os.environ, "COLUMNS": _WIDE_COLUMNS}
+    return _run(cmd, timeout=timeout, cwd=cwd, env=env)

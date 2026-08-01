@@ -1,8 +1,7 @@
 """MCP tools for inspecting CASA MeasurementSets.
 
 Thin wrappers around :class:`boepie.ms.MSInfo` that let the AI pull
-structured metadata (physical parameters, data/file parameters, and
-arbitrary field queries) for one or more MeasurementSets on disk without
+structured metadata for one or more MeasurementSets on disk without
 shelling out to casacore directly.
 """
 
@@ -12,25 +11,37 @@ import fnmatch
 import json
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from boepie.ms import MSInfo
 from boepie.utilities import write_csv
 
 
-# Valid section keys from MSInfo.__display_groups__, grouped into two
-# buckets the AI can ask for by intent. "physical" covers observational,
-# array, frequency, temporal, spatial, polarization, data quality, and UV
-# coverage. "data" covers columns, file info, software/history, and
-# scan/state bookkeeping.
-_PHYSICAL_SECTIONS = [
-    "observation", "array", "frequency", "data_dimensions",
-    "temporal", "spatial", "polarization", "data_quality", "uv_coverage",
-]
-_DATA_SECTIONS = [
-    "data_columns", "file_info", "software", "scan_state",
-]
-_ALL_SECTION_KEYS = {group["key"] for group in MSInfo.__display_groups__}
+# Section aliases the AI can ask for by intent, expanding to the
+# MSInfo.__display_groups__ keys they group. "physical" covers
+# observational, array, frequency, temporal, spatial, polarization, data
+# quality, and UV coverage. "data" covers columns, file info,
+# software/history, and scan/state bookkeeping. Aliases and individual
+# group keys are freely mixable in a single call.
+_SECTION_ALIASES: dict[str, list[str]] = {
+    "physical": [
+        "observation", "array", "frequency", "data_dimensions",
+        "temporal", "spatial", "polarization", "data_quality", "uv_coverage",
+    ],
+    "data": ["data_columns", "file_info", "software", "scan_state"],
+}
+_DISPLAY_ORDER: list[str] = [group["key"] for group in MSInfo.__display_groups__]
+_ALL_SECTION_KEYS: set[str] = set(_DISPLAY_ORDER)
+_VALID_SECTIONS_HINT = ", ".join([*_SECTION_ALIASES, *_DISPLAY_ORDER])
+
+
+def _expand_sections(sections: list[str]) -> list[str]:
+    """Expand alias entries, mix with individual keys, dedup, and order per
+    ``MSInfo.__display_groups__``."""
+    expanded: set[str] = set()
+    for key in sections:
+        expanded.update(_SECTION_ALIASES.get(key, [key]))
+    return [key for key in _DISPLAY_ORDER if key in expanded]
 
 
 def _queryable_field_names() -> list[str]:
@@ -46,111 +57,87 @@ def _queryable_field_names() -> list[str]:
 _QUERYABLE_FIELDS: list[str] = _queryable_field_names()
 
 
+def _collapse(text: str) -> str:
+    """Flatten a possibly multi-line exception message onto one line."""
+    return " ".join(str(text).split())
+
+
 def _load(ms_path: str) -> MSInfo | str:
-    """Load an MSInfo or return a human-readable error string."""
+    """Load an MSInfo, or return a one-line failure reason.
+
+    The returned string has no ``Error:`` prefix and no leading capital, so
+    callers can embed it either as a standalone ``Error: {reason}`` payload
+    or inline in a batch ``# error: {ms_path}: {reason}`` line.
+    """
     try:
         return MSInfo.from_path(ms_path)
     except FileNotFoundError as exc:
-        return f"Error: {exc}"
+        return f"{_collapse(str(exc))}. Check the path and try again."
     except ValueError as exc:
-        return f"Error: {exc}"
+        return f"{_collapse(str(exc))}. Check the path and try again."
     except Exception as exc:
-        return f"Error: failed to read MS '{ms_path}': {exc}"
-
-
-def get_ms_physical(ms_path: str) -> str:
-    """Inspect the physical parameters of a MeasurementSet.
-
-    Returns a markdown document covering observation, array configuration,
-    frequency setup, temporal coverage, pointing, polarization, data
-    quality, and UV coverage. Use this for "what was observed".
-
-    Parameters
-    ----------
-    ms_path:
-        Filesystem path to the MeasurementSet directory.
-    """
-    info = _load(ms_path)
-    if isinstance(info, str):
-        return info
-    return info.to_markdown(sections=_PHYSICAL_SECTIONS)
-
-
-def get_ms_data(ms_path: str) -> str:
-    """Inspect the data and file-level parameters of a MeasurementSet.
-
-    Returns a markdown document covering available visibility columns, the
-    main-table column list, on-disk size, creation and last-modified
-    timestamps, CASA software version, history, and scan/state bookkeeping.
-    Use this for "what data is present and when was it last touched".
-
-    Parameters
-    ----------
-    ms_path:
-        Filesystem path to the MeasurementSet directory.
-    """
-    info = _load(ms_path)
-    if isinstance(info, str):
-        return info
-    return info.to_markdown(sections=_DATA_SECTIONS)
-
-
-def get_ms_info(ms_path: str, sections: list[str] | None = None) -> str:
-    """Inspect arbitrary sections of a MeasurementSet as markdown.
-
-    Returns a markdown report containing the requested display groups. If
-    ``sections`` is omitted or empty, all groups are rendered.
-
-    Parameters
-    ----------
-    ms_path:
-        Filesystem path to the MeasurementSet directory.
-    sections:
-        Optional list of section keys to include. Valid keys:
-        ``observation``, ``array``, ``frequency``, ``data_dimensions``,
-        ``temporal``, ``spatial``, ``polarization``, ``data_columns``,
-        ``data_quality``, ``uv_coverage``, ``scan_state``, ``file_info``,
-        ``software``. Unknown keys produce an error.
-    """
-    if sections:
-        unknown = [key for key in sections if key not in _ALL_SECTION_KEYS]
-        if unknown:
-            return (
-                f"Error: unknown section(s) {unknown}. "
-                f"Valid keys: {sorted(_ALL_SECTION_KEYS)}"
-            )
-    info = _load(ms_path)
-    if isinstance(info, str):
-        return info
-    return info.to_markdown(sections=sections or None)
+        return f"failed to read MS '{ms_path}': {_collapse(str(exc))}. Check the path and try again."
 
 
 def get_ms_summary(ms_path: str) -> str:
-    """Return a compact JSON summary of a MeasurementSet.
+    """Quick-glance report on a MeasurementSet.
 
-    Token-efficient quick look: telescope, observation date, antenna and
-    field counts, frequency/bandwidth, available data columns, size on
-    disk, and flagged fraction. Prefer this over ``get_ms_info`` /
-    ``get_ms_physical`` / ``get_ms_data`` when you just need to confirm an
-    MS is what you expect.
+    Covers telescope, observation date, antenna and field counts,
+    frequency/bandwidth, available data columns, size on disk, and flagged
+    fraction. Start here to confirm an MS is what you expect before
+    reaching for ``get_ms_info`` or ``get_ms_fields``.
 
-    Parameters
-    ----------
-    ms_path:
-        Filesystem path to the MeasurementSet directory.
+    Returns an F3 report: a title line naming the MS, then key: value lines.
     """
     info = _load(ms_path)
     if isinstance(info, str):
-        return info
-    summary: dict[str, Any] = info.summary()
-    return json.dumps(summary, indent=2, default=str)
+        return f"Error: {info}"
+    return info.summary_report(title=ms_path)
 
 
-class QueryMsFieldsInput(BaseModel):
-    ms_paths: list[str]
-    """One or more MeasurementSet paths to query."""
-    fields: list[str]
-    """MSInfo field names or fnmatch patterns (e.g. ['telescope', 'number_of_*', '*frequency*'])."""
+class GetMsInfoInput(BaseModel):
+    ms_path: str = Field(description="Filesystem path to the MeasurementSet directory.")
+    sections: list[str] = Field(
+        default=[],
+        description=(
+            "Section keys or aliases to include; omit or empty for everything. "
+            "Aliases: 'physical' (observation, array, frequency, data_dimensions, "
+            "temporal, spatial, polarization, data_quality, uv_coverage), 'data' "
+            "(data_columns, file_info, software, scan_state). Individual group "
+            "keys are also accepted and may be mixed with aliases."
+        ),
+    )
+
+
+def get_ms_info(input: GetMsInfoInput) -> str:
+    """Inspect selected sections of a MeasurementSet.
+
+    Use for a structured look beyond ``get_ms_summary``: the physical setup
+    (``sections=["physical"]``), file/bookkeeping data (``sections=["data"]``),
+    any individual group key, or a mix of both.
+
+    Returns an F3 report grouped by section; each section's keys are MSInfo
+    field names, the same vocabulary ``get_ms_fields`` uses.
+    """
+    if input.sections:
+        unknown = [key for key in input.sections if key not in _ALL_SECTION_KEYS and key not in _SECTION_ALIASES]
+        if unknown:
+            return f"Error: unknown section(s) {', '.join(unknown)}. Valid: {_VALID_SECTIONS_HINT}."
+        selected = _expand_sections(input.sections)
+    else:
+        selected = None
+
+    info = _load(input.ms_path)
+    if isinstance(info, str):
+        return f"Error: {info}"
+    return info.to_report(sections=selected, title=input.ms_path)
+
+
+class GetMsFieldsInput(BaseModel):
+    ms_paths: list[str] = Field(description="One or more MeasurementSet paths to query.")
+    fields: list[str] = Field(
+        description="MSInfo field names or fnmatch patterns, e.g. ['telescope', 'number_of_*', '*frequency*']."
+    )
 
 
 def _serialise_field_value(value: Any) -> str:
@@ -180,50 +167,46 @@ def _expand_field_patterns(patterns: list[str]) -> list[str]:
     return matched
 
 
-def query_ms_fields(input: QueryMsFieldsInput) -> str:
+def get_ms_fields(input: GetMsFieldsInput) -> str:
     """Batch lookup of MSInfo field values across one or more MeasurementSets.
 
-    Supply a list of ``ms_paths`` and a list of ``fields`` (exact names or
-    fnmatch patterns over MSInfo field names). Returns a CSV with ``ms``,
-    ``field``, ``value`` columns plus an ``error`` column when any path
-    fails to load.
+    Most token-efficient way to verify or compare many fields across one or
+    more MeasurementSets in a single call. ``fields`` accepts exact MSInfo
+    field names or fnmatch patterns (``["*"]`` for all), matched against both
+    raw fields (``telescope``, ``number_of_antennas``) and computed ones
+    (``observing_frequency_ghz``, ``total_visibilities``,
+    ``angular_resolution_arcsec``).
 
-    Field names include everything on ``MSInfo``: raw fields like
-    ``telescope``, ``number_of_antennas``, ``available_data_columns``, plus
-    computed fields like ``observing_frequency_ghz``, ``total_visibilities``,
-    ``angular_resolution_arcsec``. Patterns follow fnmatch syntax - use
-    ``['*']`` for every field, ``['number_of_*']`` for counts,
-    ``['*frequency*']`` for frequency-related fields.
+    Returns a count line followed by a CSV table: ``ms``, ``field``,
+    ``value``. An MS path that fails to load is reported on its own
+    ``# error`` line before the count line instead of sinking the batch; a
+    pattern that matches nothing is silently skipped.
 
-    Use this when comparing the same fields across multiple MSes, or when
-    projecting a small set of fields without pulling full markdown
-    sections. A bad MS path produces an error row for that MS; patterns
-    that match nothing are silently skipped.
-
-    Example input:
+    Example:
       ms_paths: ["obs1.ms", "obs2.ms"]
       fields: ["telescope", "observing_frequency_ghz", "number_of_*"]
     """
     field_columns = _expand_field_patterns(input.fields)
     columns = ["ms", "field", "value"]
+
     rows: list[dict[str, Any]] = []
-    has_error = False
+    errors: list[str] = []
+    shown_ms: set[str] = set()
 
     for ms_path in input.ms_paths:
         info = _load(ms_path)
         if isinstance(info, str):
-            rows.append({"ms": ms_path, "field": "", "value": "", "error": info})
-            has_error = True
+            errors.append(f"# error: {ms_path}: {info}")
             continue
-        for field_name in field_columns:
-            rows.append(
-                {
-                    "ms": ms_path,
-                    "field": field_name,
-                    "value": _serialise_field_value(getattr(info, field_name, None)),
-                }
-            )
 
-    if has_error:
-        columns.append("error")
-    return write_csv(rows, columns)
+        for field_name in field_columns:
+            rows.append({
+                "ms": ms_path,
+                "field": field_name,
+                "value": _serialise_field_value(getattr(info, field_name, None)),
+            })
+        if field_columns:
+            shown_ms.add(ms_path)
+
+    count_line = f"# showing {len(rows)} fields across {len(shown_ms)} ms"
+    return "\n".join([*errors, count_line, write_csv(rows, columns)])

@@ -7,6 +7,7 @@ Slash commands:
     /list             Show all tools on the connected server
     /show <tool>      Show docstring and parameters for a tool
     /call <tool>      Prompt for parameters and invoke a tool
+    /ask <question>   Query the RAG engine directly (boepie.rag.search)
     /help             Show this help
     /quit  /exit      Leave the shell
 """
@@ -15,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shlex
 import time
 from typing import Any, Iterable
 
@@ -29,6 +31,8 @@ from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.table import Table
 
+from boepie.rag import search
+from boepie.rag.models import Filter
 from boepie.server import mcp as boepie_mcp
 
 console = Console()
@@ -37,6 +41,7 @@ SLASH_COMMANDS: dict[str, str] = {
     "/list": "list all tools on the server",
     "/show": "show docstring and parameters for a tool",
     "/call": "prompt for parameters and invoke a tool",
+    "/ask": "query the RAG engine directly (boepie.rag.search)",
     "/help": "show this help",
     "/quit": "exit the shell",
     "/exit": "exit the shell",
@@ -71,9 +76,44 @@ class SlashCompleter(Completer):
                     yield Completion(tool_name, start_position=-len(fragment))
 
 
+def _inline_refs(node: Any, defs: dict[str, Any], seen: frozenset[str] = frozenset()) -> Any:
+    """Recursively replace ``{"$ref": "#/$defs/Name"}`` nodes with their target.
+
+    FastMCP renders a tool whose single argument is a Pydantic model (e.g.
+    ``search_literature(input: SearchLiteratureInput)``) as a top-level
+    ``input`` property that ``$ref``s into ``$defs``. The rest of this shell's
+    schema walker only understands inline ``type``/``properties``/``items``,
+    so we flatten every ``$ref`` first. Sibling keys alongside a ``$ref``
+    (like a ``default``) are preserved; self-referential schemas are broken
+    with a bare object to avoid infinite recursion.
+    """
+    if isinstance(node, dict):
+        ref = node.get("$ref")
+        if isinstance(ref, str) and ref.startswith("#/$defs/"):
+            name = ref.rsplit("/", 1)[-1]
+            if name in seen:
+                return {"type": "object"}
+            target = _inline_refs(defs.get(name, {}), defs, seen | {name})
+            siblings = {k: _inline_refs(v, defs, seen) for k, v in node.items() if k != "$ref"}
+            return {**target, **siblings}
+        return {key: _inline_refs(value, defs, seen) for key, value in node.items()}
+    if isinstance(node, list):
+        return [_inline_refs(item, defs, seen) for item in node]
+    return node
+
+
+def _input_schema(tool: Any) -> dict[str, Any]:
+    """The tool's input schema with all ``$ref``s inlined and ``$defs`` dropped."""
+    schema = dict(tool.inputSchema or {})
+    defs = schema.pop("$defs", None)
+    if not defs:
+        return schema
+    return _inline_refs(schema, defs)
+
+
 def _tool_signature(tool: Any) -> str:
     """One-line signature like ``name(req: str, opt?: int)``."""
-    schema = tool.inputSchema or {}
+    schema = _input_schema(tool)
     properties = schema.get("properties") or {}
     required_params = set(schema.get("required") or [])
     parts: list[str] = []
@@ -99,6 +139,12 @@ def _make_bottom_toolbar(tool_map: dict[str, Any]):
             return HTML("<b>/</b> for commands")
         parts = text.split(maxsplit=1)
         head = parts[0]
+        if head == "/ask":
+            return HTML(
+                "<b>/ask</b> &lt;question&gt;  "
+                "[--mode hybrid|dense|bm25] [--top-k N] "
+                "[--collection name] [--year-min Y] [--year-max Y]"
+            )
         if head in SLASH_COMMANDS and head not in ("/show", "/call"):
             return HTML(f"<b>{head}</b> {SLASH_COMMANDS[head]}")
         if head in ("/show", "/call"):
@@ -208,7 +254,7 @@ def show_tool_details(tool_map: dict[str, Any], name: str) -> None:
         )
     )
 
-    schema = tool.inputSchema or {}
+    schema = _input_schema(tool)
     properties = schema.get("properties") or {}
     required_params = set(schema.get("required") or [])
 
@@ -438,7 +484,7 @@ async def call_tool_interactively(
         console.print(f"[red]unknown tool: {name}[/red]")
         return
 
-    schema = tool.inputSchema or {}
+    schema = _input_schema(tool)
     properties = schema.get("properties") or {}
     required_params = set(schema.get("required") or [])
 
@@ -473,6 +519,125 @@ async def call_tool_interactively(
     elapsed = time.perf_counter() - start
 
     _render_tool_output(name, result, elapsed, request_bytes)
+
+
+_ASK_USAGE = (
+    "usage: /ask <question> [--mode hybrid|dense|bm25] [--top-k N] "
+    "[--collection name] [--year-min Y] [--year-max Y]"
+)
+_ASK_FLAGS = {
+    "--mode": "mode", "-m": "mode",
+    "--top-k": "top_k", "-k": "top_k",
+    "--collection": "collection", "-c": "collection",
+    "--year-min": "year_min",
+    "--year-max": "year_max",
+}
+
+
+def _parse_ask_args(argument: str) -> tuple[str, dict[str, Any]]:
+    """Split an /ask line into (question, options), CLI-style flags after the text."""
+    opts: dict[str, Any] = {
+        "mode": "hybrid", "top_k": 5, "collection": "literature",
+        "year_min": None, "year_max": None,
+    }
+    tokens = shlex.split(argument)
+    words: list[str] = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        key = _ASK_FLAGS.get(token)
+        if key is None:
+            words.append(token)
+            index += 1
+            continue
+        if index + 1 >= len(tokens):
+            raise ValueError(f"missing value for {token}")
+        raw = tokens[index + 1]
+        opts[key] = int(raw) if key in ("top_k", "year_min", "year_max") else raw
+        index += 2
+
+    if opts["mode"] not in ("hybrid", "dense", "bm25"):
+        raise ValueError(f"invalid mode '{opts['mode']}' (hybrid|dense|bm25)")
+    return " ".join(words), opts
+
+
+def _render_search_results(question: str, results: list[Any], elapsed: float) -> None:
+    """Print ranked chunks with their provenance."""
+    if not results:
+        console.print("[yellow]no results[/yellow]")
+        return
+    for rank, result in enumerate(results, 1):
+        chunk = result.chunk
+        meta = chunk.metadata
+        title = meta.get("title") or meta.get("citekey") or chunk.document_id
+        ranks = []
+        if result.dense_rank is not None:
+            ranks.append(f"dense#{result.dense_rank}")
+        if result.bm25_rank is not None:
+            ranks.append(f"bm25#{result.bm25_rank}")
+        provenance = (
+            f"[cyan]{chunk.source_path}[/cyan]  (chars {chunk.char_start}-{chunk.char_end})"
+        )
+        if chunk.section:
+            provenance += f"\n[dim]section:[/dim] {chunk.section}"
+        if meta.get("images"):
+            provenance += f"\n[dim]images:[/dim] {len(meta['images'])} referenced"
+        snippet = chunk.text.strip()
+        if len(snippet) > 600:
+            snippet = snippet[:600] + " ..."
+        title_line = (
+            f"[bold]{rank}. {title}[/bold]  "
+            f"[dim]score={result.score:.4f}"
+            + (f"  {' '.join(ranks)}" if ranks else "")
+            + "[/dim]"
+        )
+        console.print(Panel(f"{provenance}\n\n{snippet}", title=title_line, title_align="left"))
+    console.print(
+        f"[dim]{len(results)} results in {_humanize_duration(elapsed)} "
+        f"for: {question!r}[/dim]"
+    )
+
+
+async def ask_directly(argument: str) -> None:
+    """Drive boepie.rag.search directly (bypasses the MCP tool wrapper)."""
+    if not argument.strip():
+        console.print(f"[red]{_ASK_USAGE}[/red]")
+        return
+    try:
+        question, opts = _parse_ask_args(argument)
+    except ValueError as error:
+        console.print(f"[red]{error}[/red]\n[dim]{_ASK_USAGE}[/dim]")
+        return
+    if not question:
+        console.print(f"[red]no question provided[/red]\n[dim]{_ASK_USAGE}[/dim]")
+        return
+
+    filters: list[Filter] = []
+    if opts["year_min"] is not None:
+        filters.append(Filter(field="year", op="gte", value=opts["year_min"]))
+    if opts["year_max"] is not None:
+        filters.append(Filter(field="year", op="lte", value=opts["year_max"]))
+
+    console.print(
+        f"[dim]searching '{opts['collection']}' "
+        f"(mode={opts['mode']}, top_k={opts['top_k']})...[/dim]"
+    )
+    start = time.perf_counter()
+    try:
+        results = await search(
+            question,
+            opts["collection"],
+            top_k=opts["top_k"],
+            filters=filters or None,
+            mode=opts["mode"],
+        )
+    except (FileNotFoundError, ValueError) as error:
+        console.print(f"[red]{error}[/red]")
+        return
+    except Exception as error:  # noqa: BLE001 - surface any engine error to the user
+        console.print(f"[red]search failed: {error}[/red]")
+        return
+    _render_search_results(question, results, time.perf_counter() - start)
 
 
 async def repl() -> None:
@@ -530,6 +695,9 @@ async def repl() -> None:
                 continue
             if command == "/call":
                 await call_tool_interactively(client, session, tool_map, argument)
+                continue
+            if command == "/ask":
+                await ask_directly(argument)
                 continue
 
             console.print(f"[red]unknown command: {command}[/red] (try /help)")
