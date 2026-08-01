@@ -12,7 +12,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field
 
 from boepie.runner import CabParam, list_cabs_with_info, load_cab_schema
-from boepie.utilities import write_csv
+from boepie.tools._table import write_csv
 
 
 # Canonical field order for get_cab_params output.

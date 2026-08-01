@@ -14,7 +14,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from boepie.ms import MSInfo
-from boepie.utilities import write_csv
+from boepie.tools._table import write_csv
 
 
 # Section aliases the AI can ask for by intent, expanding to the
