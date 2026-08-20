@@ -6,9 +6,9 @@
 """
 package_content.py
 -------------------
-Package a curated knowledge-bundle content directory (index.md, log.md,
+Package a curated context-bundle content directory (index.md, apply-log.md,
 concepts/, playbooks/, cabs/, literature/) into the `knowledge-content.tar.gz`
-release asset that `boepie knowledge fetch` expects: a tarball whose root
+release asset that `boepie context fetch` expects: a tarball whose root
 holds the content files directly (no wrapping directory, unlike
 package_index.py's per-index-id layout - there is only ever one content
 cache) plus a `content-manifest.json` recording `content_version` and

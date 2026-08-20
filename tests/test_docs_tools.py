@@ -11,7 +11,6 @@ design/interface-spec.md, not the exact prose, which is expected to churn.
 
 from __future__ import annotations
 
-import json
 import re
 from pathlib import Path
 
@@ -26,6 +25,7 @@ from boepie.tools.docs import (
     read_docs,
     search_docs,
 )
+from tests.conftest import write_corpus_document
 
 _LONG_TAIL = (
     "Beyond that, every cab declares its inputs and outputs in a schema that "
@@ -35,59 +35,64 @@ _LONG_TAIL = (
 
 
 class _FakeDocs:
-    """Tiny docs corpus fixture builder: two projects, 2-3 pages each."""
+    """Tiny docs corpus fixture builder: two projects, 2-3 pages each.
+
+    Written in the real corpus layout (full-title filenames, surrogate ids,
+    a namespaced `docs` frontmatter block) via `write_corpus_document`, so
+    what DocsLoader walks here is what it walks in a real installation.
+    """
 
     def __init__(self, tmp_corpus: Path) -> None:
         self.tmp_corpus = tmp_corpus
 
-        stimela_dir = tmp_corpus / "stimela"
-        stimela_dir.mkdir(parents=True)
-        (stimela_dir / "metadata.json").write_text(
-            json.dumps({
-                "project": "stimela",
-                "version": "1.3.0",
-                "base_url": "https://stimela.readthedocs.io/",
-            }),
-            encoding="utf-8",
-        )
-        (stimela_dir / "recipe_syntax.md").write_text(
-            "# Stimela Recipe Syntax\n\n"
-            "A stimela recipe defines a pipeline of cabs. "
-            "Each cab is a containerised tool wrapped with parameter "
-            "validation and input/output handling. " + _LONG_TAIL,
-            encoding="utf-8",
-        )
-        (stimela_dir / "cabs_reference.md").write_text(
-            "# Cabs Reference\n\n"
-            "Cabs are containerised applications. "
-            "They run inside Docker or Singularity containers and handle "
-            "data I/O, parameter validation, and result reporting.",
-            encoding="utf-8",
-        )
+        pages = [
+            (
+                "doc0000001", "stimela", "recipe_syntax", "Stimela Recipe Syntax",
+                "A stimela recipe defines a pipeline of cabs. "
+                "Each cab is a containerised tool wrapped with parameter "
+                "validation and input/output handling. " + _LONG_TAIL,
+            ),
+            (
+                "doc0000002", "stimela", "cabs_reference", "Cabs Reference",
+                "Cabs are containerised applications. "
+                "They run inside Docker or Singularity containers and handle "
+                "data I/O, parameter validation, and result reporting.",
+            ),
+            (
+                "doc0000003", "quartical", "solvers", "Quartical Solvers",
+                "Quartical supports multiple calibration solvers including "
+                "Gauss-Newton, Levenberg-Marquardt, and direct matrix inversion. "
+                "Each solver has trade-offs in convergence speed and accuracy.",
+            ),
+            (
+                "doc0000004", "quartical", "gains", "Gain Calibration",
+                "Gain calibration computes per-antenna complex gains to correct "
+                "for instrumental effects and atmospheric distortions.",
+            ),
+        ]
+        versions = {"stimela": "1.3.0", "quartical": "0.6.0"}
+        base_urls = {
+            "stimela": "https://stimela.readthedocs.io/",
+            "quartical": "https://quartical.readthedocs.io/",
+        }
 
-        quartical_dir = tmp_corpus / "quartical"
-        quartical_dir.mkdir(parents=True)
-        (quartical_dir / "metadata.json").write_text(
-            json.dumps({
-                "project": "quartical",
-                "version": "0.6.0",
-                "base_url": "https://quartical.readthedocs.io/",
-            }),
-            encoding="utf-8",
-        )
-        (quartical_dir / "solvers.md").write_text(
-            "# Quartical Solvers\n\n"
-            "Quartical supports multiple calibration solvers including "
-            "Gauss-Newton, Levenberg-Marquardt, and direct matrix inversion. "
-            "Each solver has trade-offs in convergence speed and accuracy.",
-            encoding="utf-8",
-        )
-        (quartical_dir / "gains.md").write_text(
-            "# Gain Calibration\n\n"
-            "Gain calibration computes per-antenna complex gains to correct "
-            "for instrumental effects and atmospheric distortions.",
-            encoding="utf-8",
-        )
+        for document_id, project, page, title, body in pages:
+            write_corpus_document(
+                tmp_corpus,
+                document_id=document_id,
+                title=title,
+                body=f"# {title}\n\n{body}",
+                group=project,
+                origin=f"{base_urls[project]}{page}.html",
+                via="sphinx",
+                source_format="html",
+                docs={
+                    "project": project,
+                    "page": page,
+                    "base_url": base_urls[project],
+                    "version": versions[project],
+                },
+            )
 
 
 def _hit_lines(payload: str) -> list[str]:
@@ -133,7 +138,7 @@ async def test_search_docs_emits_f2_count_line_and_numbered_blocks(docs_index):
 async def test_search_docs_hit_line_identifies_project_and_page(docs_index):
     result = await search_docs(SearchDocsInput(question="recipe syntax", mode="bm25"))
     hit = _hit_lines(result)[0]
-    assert hit.startswith("[1] stimela/recipe_syntax")
+    assert hit.startswith("[1] stimela: Stimela Recipe Syntax")
 
 
 async def test_search_docs_hit_line_carries_no_numeric_score(docs_index):
@@ -146,12 +151,12 @@ async def test_search_docs_hit_line_carries_no_numeric_score(docs_index):
 
 async def test_search_docs_surfaces_copy_pasteable_read_handles(docs_index):
     result = await search_docs(SearchDocsInput(question="recipe syntax", mode="bm25"))
-    assert "    read: document_id=stimela/recipe_syntax chunk_index=" in result
+    assert "    read: document_id=doc0000001 chunk_index=" in result
 
 
 async def test_search_docs_source_path_is_relative(docs_index):
     result = await search_docs(SearchDocsInput(question="recipe syntax", mode="bm25"))
-    assert "source: stimela/recipe_syntax.md (chars " in result
+    assert "source: stimela/Stimela Recipe Syntax.md (chars " in result
     assert str(docs_index) not in result  # no absolute path
 
 
@@ -171,9 +176,9 @@ async def test_search_docs_filters_by_project(docs_index):
     )
     assert _hit_lines(result_stimela) and _hit_lines(result_quartical)
     for line in _hit_lines(result_stimela):
-        assert "stimela/" in line
+        assert line.startswith("[1] stimela: ") or "stimela: " in line
     for line in _hit_lines(result_quartical):
-        assert "quartical/" in line
+        assert "quartical: " in line
 
 
 # ---------------------------------------------------------------------------
@@ -251,13 +256,13 @@ async def test_search_docs_top_k_upper_bound_is_twenty(docs_index):
 
 async def test_read_docs_emits_f4_provenance_header(docs_index):
     result = await read_docs(
-        ReadDocsInput(requests=[ReadRequest(document_id="stimela/recipe_syntax")])
+        ReadDocsInput(requests=[ReadRequest(document_id="doc0000001")])
     )
     lines = result.splitlines()
     assert re.match(
-        r"^document_id=stimela/recipe_syntax chunks=\d+-\d+ chars=\d+-\d+$", lines[0]
+        r"^document_id=doc0000001 chunks=\d+-\d+ chars=\d+-\d+$", lines[0]
     )
-    assert lines[1] == "source: stimela/recipe_syntax.md"
+    assert lines[1] == "source: stimela/Stimela Recipe Syntax.md"
     assert lines[2] == "sections: Stimela Recipe Syntax"
     assert lines[3] == ""
     assert "A stimela recipe defines a pipeline of cabs." in result
@@ -268,8 +273,8 @@ async def test_read_docs_batches_without_a_horizontal_rule(docs_index):
     result = await read_docs(
         ReadDocsInput(
             requests=[
-                ReadRequest(document_id="stimela/recipe_syntax"),
-                ReadRequest(document_id="quartical/solvers"),
+                ReadRequest(document_id="doc0000001"),
+                ReadRequest(document_id="doc0000003"),
             ]
         )
     )
@@ -279,7 +284,7 @@ async def test_read_docs_batches_without_a_horizontal_rule(docs_index):
 
 async def test_read_docs_reports_unknown_document_on_one_line(docs_index):
     result = await read_docs(
-        ReadDocsInput(requests=[ReadRequest(document_id="nope/missing")])
+        ReadDocsInput(requests=[ReadRequest(document_id="nosuchid99")])
     )
     assert result.startswith("Error:")
     assert len(result.splitlines()) == 1

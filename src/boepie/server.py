@@ -8,21 +8,23 @@ from __future__ import annotations
 
 from fastmcp import FastMCP
 
-from boepie.tools.cabs import (
+from boepie.pipeline.cabs import (
     get_cab_docs,
     get_cab_params,
     get_cab_schema,
     list_cabs,
 )
+from boepie.tools.corpus import list_corpus
 from boepie.tools.docs import read_docs, search_docs
-from boepie.tools.knowledge import search_knowledge
+from boepie.tools.context import search_context
 from boepie.tools.literature import read_literature, search_literature
-from boepie.tools.measurement_set import (
+from boepie.tools.notes import read_notes, search_notes
+from boepie.pipeline.measurement_set import (
     get_ms_fields,
     get_ms_info,
     get_ms_summary,
 )
-from boepie.tools.pipeline import run_recipe, validate_recipe
+from boepie.pipeline.recipe import run_recipe, validate_recipe
 
 mcp = FastMCP(
     "boepie",
@@ -51,7 +53,7 @@ mcp = FastMCP(
         "2. Pipeline strategy / recipe-language concepts (\"how do I "
         "structure this pipeline\", \"what does this recipe-language "
         "feature mean\") -> check whether a `.boepie/` knowledge bundle "
-        "exists in the working directory and call `search_knowledge`. Its "
+        "exists in the working directory and call `search_context`. Its "
         "results are file locations, not answers: read the named files "
         "with your native file tools, starting at `.boepie/index.md` if "
         "you have not already.\n"
@@ -60,6 +62,15 @@ mcp = FastMCP(
         "expand a promising hit.\n"
         "4. Algorithms and the 'why' behind a method -> `search_literature`, "
         "then `read_literature` to expand a promising hit.\n"
+        "5. The user's own added material (their papers, notes, files) -> "
+        "`search_notes`, then `read_notes`. Machine-global and entirely "
+        "user-curated, so prefer it when a question is about this user's "
+        "own conventions rather than upstream behaviour.\n"
+        "\n"
+        "When you need to know what a collection contains rather than what "
+        "matches a query - which docs projects exist before filtering "
+        "`search_docs` by one, or whether a paper is present at all - call "
+        "`list_corpus`. Pass `detail='documents'` to get read handles.\n"
         "\n"
         "## Critical rule: use these tools, do not improvise\n"
         "Do NOT run 'stimela' via a shell. Do NOT read cultcargo YAML files "
@@ -111,7 +122,7 @@ mcp = FastMCP(
         "- `get_cab_params`: most token-efficient when verifying or "
         "comparing many params across one or more cabs in a single call. "
         "Supports fnmatch patterns in each cab's `params` list.\n"
-        "- `search_knowledge`: BM25 over the local `.boepie/` knowledge "
+        "- `search_context`: BM25 over the local `.boepie/` knowledge "
         "bundle. Returns coordinates, not content - the cheapest first stop "
         "for pipeline-strategy questions.\n"
         "- `search_docs`: searches the upstream documentation corpus "
@@ -137,7 +148,7 @@ mcp = FastMCP(
         "Use `search_literature` to retrieve passages from the radio-astronomy "
         "paper corpus when explaining the algorithms behind cabs (cleaning, "
         "calibration, imaging, gridding) or justifying parameter choices. It "
-        "returns chunks with their source paper, file path, and section, so "
+        "returns chunks with their paper title, source path, and section, so "
         "cite those rather than answering from general knowledge. Each hit also "
         "carries `document_id` and `chunk_index` read handles.\n"
         "When a snippet is on-topic but cut off, follow up with "
@@ -157,6 +168,9 @@ mcp = FastMCP(
         "- Do not guess MS metadata. Confirm via `get_ms_summary` or "
         "`get_ms_fields` before writing MS-specific values into a recipe.\n"
         "- Do not execute recipes that have not been validated.\n"
+        "- A `document_id` is an opaque id (e.g. `aB3dE9fGhI`), not a title, "
+        "citekey, or path. Copy it from a `search_*` hit's `read:` line or "
+        "from `list_corpus`; never construct or guess one.\n"
         "- Do not modify files under cultcargo; it is authoritative input.\n"
         "- When the user asks 'what tools can do X?', call `list_cabs` with "
         "a pattern first, then `get_cab_docs` on promising candidates. Do "
@@ -172,7 +186,7 @@ mcp.tool(get_cab_schema)
 mcp.tool(get_cab_params)
 
 # -- Knowledge bundle tools --
-mcp.tool(search_knowledge)
+mcp.tool(search_context)
 
 # -- Docs tools --
 mcp.tool(search_docs)
@@ -181,6 +195,12 @@ mcp.tool(read_docs)
 # -- Literature tools --
 mcp.tool(search_literature)
 mcp.tool(read_literature)
+
+# -- Notes tools --
+mcp.tool(search_notes)
+mcp.tool(read_notes)
+
+mcp.tool(list_corpus)
 
 # -- Pipeline tools --
 mcp.tool(validate_recipe)

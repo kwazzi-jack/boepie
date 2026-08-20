@@ -8,7 +8,7 @@ from __future__ import annotations
 from fastmcp import Client
 from fastmcp.client.transports import FastMCPTransport
 
-from boepie.runner import CabSchema
+from boepie.pipeline.runner import CabSchema
 
 
 def _text(result: object) -> str:

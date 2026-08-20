@@ -1,0 +1,138 @@
+[
+  {
+    "citekey": "mitchellRealTimeCalibrationMurchison2008",
+    "arxiv_id": "0807.1912",
+    "title": "Real-Time Calibration of the Murchison Widefield Array",
+    "authors": "Mitchell, D.A. and Greenhill, L.J. and Wayth, R.B. and Sault, R.J. and Lonsdale, C.J. and Cappallo, R.J. and Morales, M.F. and Ord, S.M.",
+    "year": "2008",
+    "doi": "10.1109/JSTSP.2008.2005327"
+  },
+  {
+    "citekey": "noordamMeqTreesSoftwareSystem2010",
+    "arxiv_id": "1101.1745",
+    "title": "The MeqTrees software system and its use for third-generation calibration of radio interferometers",
+    "authors": "Noordam, J. E. and Smirnov, O. M.",
+    "year": "2010",
+    "doi": "10.1051/0004-6361/201015013"
+  },
+  {
+    "citekey": "offringaWscleanImplementationFast2014",
+    "arxiv_id": "1407.1943",
+    "title": "WSClean: an implementation of a fast, generic wide-field imager for radio astronomy",
+    "authors": "Offringa, A. R. and McKinley, B. and Hurley-Walker, N. and Briggs, F. H. and Wayth, R. B. and Kaplan, D. L. and Bell, M. E. and Feng, L. and Neben, A. R. and Hughes, J. D. and Rhee, J. and Murphy, T. and Bhat, N. D. R. and Bernardi, G. and Bowman, J. D. and Cappallo, R. J. and Corey, B. E. and Deshpande, A. A. and Emrich, D. and Ewall-Wice, A. and Gaensler, B. M. and Goeke, R. and Greenhill, L. J. and Hazelton, B. J. and Hindson, L. and Johnston-Hollitt, M. and Jacobs, D. C. and Kasper, J. C. and Kratzenberg, E. and Lenc, E. and Lonsdale, C. J. and Lynch, M. J. and McWhirter, S. R. and Mitchell, D. A. and Morales, M. F. and Morgan, E. and Kudryavtseva, N. and Oberoi, D. and Ord, S. M. and Pindor, B. and Procopio, P. and Prabu, T. and Riding, J. and Roshi, D. A. and Shankar, N. Udaya and Srivani, K. S. and Subrahmanyan, R. and Tingay, S. J. and Waterson, M. and Webster, R. L. and Whitney, A. R. and Williams, A. and Williams, C. L.",
+    "year": "2014",
+    "doi": "10.1093/mnras/stu1368"
+  },
+  {
+    "citekey": "perkinsMontblancGPUAccelerated2015",
+    "arxiv_id": "1501.07719",
+    "title": "Montblanc: GPU accelerated Radio Interferometer Measurement Equations in support of Bayesian Inference for Radio Observations",
+    "authors": "Perkins, S.J. and Marais, P.C. and Zwart, J.T.L. and Natarajan, I. and Tasse, C. and Smirnov, O.",
+    "year": "2015",
+    "doi": "10.1016/j.ascom.2015.06.003"
+  },
+  {
+    "citekey": "salviniFastGainCalibration2014",
+    "arxiv_id": "1410.2101",
+    "title": "Fast gain calibration in radio astronomy using alternating direction implicit methods: Analysis and applications",
+    "authors": "Salvini, Stefano and Wijnholds, Stefan J.",
+    "year": "2014",
+    "doi": "10.1051/0004-6361/201424487"
+  },
+  {
+    "citekey": "smirnovRadioInterferometricGain2015",
+    "arxiv_id": "1502.06974",
+    "title": "Radio interferometric gain calibration as a complex optimization problem",
+    "authors": "Smirnov, O. M. and Tasse, C.",
+    "year": "2015",
+    "doi": "10.1093/mnras/stv418"
+  },
+  {
+    "citekey": "smirnovRevisitingRadioInterferometer2011",
+    "arxiv_id": "1101.1764",
+    "title": "Revisiting the radio interferometer measurement equation. I. A full-sky Jones formalism",
+    "authors": "Smirnov, O. M.",
+    "year": "2011",
+    "doi": "10.1051/0004-6361/201016082"
+  },
+  {
+    "citekey": "smirnovRevisitingRadioInterferometer2011a",
+    "arxiv_id": "1101.1765",
+    "title": "Revisiting the radio interferometer measurement equation. II. Calibration and direction-dependent effects",
+    "authors": "Smirnov, O. M.",
+    "year": "2011",
+    "doi": "10.1051/0004-6361/201116434"
+  },
+  {
+    "citekey": "smirnovRevisitingRadioInterferometer2011b",
+    "arxiv_id": "1101.1768",
+    "title": "Revisiting the radio interferometer measurement equation. III. Addressing direction-dependent effects in 21 cm WSRT observations of 3C 147",
+    "authors": "Smirnov, O. M.",
+    "year": "2011",
+    "doi": "10.1051/0004-6361/201116435"
+  },
+  {
+    "citekey": "smirnovRevisitingRadioInterferometer2011c",
+    "arxiv_id": "1106.0579",
+    "title": "Revisiting the radio interferometer measurement equation. IV. A generalized tensor formalism",
+    "authors": "Smirnov, O. M.",
+    "year": "2011",
+    "doi": "10.1051/0004-6361/201116764"
+  },
+  {
+    "citekey": "tasseFacetingDirectiondependentSpectral2018",
+    "arxiv_id": "1712.02078",
+    "title": "Faceting for direction-dependent spectral deconvolution",
+    "authors": "Tasse, C. and Hugo, B. and Mirmont, M. and Smirnov, O. and Atemkeng, M. and Bester, L. and Hardcastle, M. J. and Lakhoo, R. and Perkins, S. and Shimwell, T.",
+    "year": "2018",
+    "doi": "10.1051/0004-6361/201731474"
+  },
+  {
+    "citekey": "tasseNonlinearKalmanFilters2014",
+    "arxiv_id": "1403.6308",
+    "title": "Non-linear Kalman filters for calibration in radio interferometry",
+    "authors": "Tasse, C.",
+    "year": "2014",
+    "doi": "10.1051/0004-6361/201423503"
+  },
+  {
+    "citekey": "kenyonCubicalFastRadio2018",
+    "arxiv_id": "1805.03410",
+    "title": "CubiCal - Fast radio interferometric calibration suite exploiting complex optimisation",
+    "authors": "Kenyon, J S and Smirnov, O M and Grobler, T L and Perkins, S J",
+    "year": "2018",
+    "doi": "10.1093/mnras/sty1221"
+  },
+  {
+    "citekey": "perkinsAfricanusScalableDistributed2025",
+    "arxiv_id": "2412.12052",
+    "title": "Africanus I. Scalable, distributed and efficient radio data processing with Dask-MS and Codex Africanus",
+    "authors": "Perkins, S.J. and Kenyon, J.S. and Andati, L.A.L. and Bester, H.L. and Smirnov, O.M. and Hugo, B.V.",
+    "year": "2025",
+    "doi": "10.1016/j.ascom.2025.100958"
+  },
+  {
+    "citekey": "besterAfricanusIIIPfbimagingA2026",
+    "arxiv_id": "2412.10073",
+    "title": "Africanus III. pfb-imaging -- a flexible radio interferometric imaging suite",
+    "authors": "Bester, H.L. and Kenyon, J.S. and Repetti, A. and Perkins, S.J. and Smirnov, O.M. and Blecher, T. and Mhiri, Y. and Roth, J. and Heywood, I. and Wiaux, Y. and Hugo, B.V.",
+    "year": "2026",
+    "doi": "10.1016/j.ascom.2025.100996"
+  },
+  {
+    "citekey": "kenyonAfricanusIIQuartiCal2025",
+    "arxiv_id": "2412.10072",
+    "title": "Africanus II. QuartiCal: calibrating radio interferometer data at scale using Numba and Dask",
+    "authors": "Kenyon, J.S. and Perkins, S.J. and Bester, H.L. and Smirnov, O.M. and Russeeawon, C. and Hugo, B.V.",
+    "year": "2025",
+    "doi": "10.1016/j.ascom.2025.100962"
+  },
+  {
+    "citekey": "smirnovAfricanusIVStimela22025",
+    "arxiv_id": "2412.10080",
+    "title": "Africanus IV. The Stimela2 framework: scalable and reproducible workflows, from local to cloud compute",
+    "authors": "Smirnov, O.M. and Makhathini, S. and Kenyon, J.S. and Bester, H.L. and Perkins, S.J. and Ramaila, A.J.T. and Hugo, B.V.",
+    "year": "2025",
+    "doi": "10.1016/j.ascom.2025.100959"
+  }
+]

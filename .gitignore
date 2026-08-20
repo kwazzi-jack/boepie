@@ -78,3 +78,6 @@ CLAUDE.md
 # Dev-stuff
 GITCONV.md
 scripts/files/
+
+# Local test kit (documents + test plan); deliberately untracked
+boepie-test/

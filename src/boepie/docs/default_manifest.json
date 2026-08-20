@@ -1,0 +1,17 @@
+[
+  {
+    "project": "stimela",
+    "base_url": "https://stimela.readthedocs.io/en/latest/",
+    "exclude": []
+  },
+  {
+    "project": "quartical",
+    "base_url": "https://quartical.readthedocs.io/en/latest/",
+    "exclude": []
+  },
+  {
+    "project": "wsclean",
+    "base_url": "https://wsclean.readthedocs.io/en/latest/",
+    "exclude": ["changelogs/*"]
+  }
+]

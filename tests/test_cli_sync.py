@@ -1,12 +1,13 @@
-"""Tests for `boepie sync` (composite of `knowledge fetch` -> `index fetch`
-per default collection -> `knowledge apply`/`init`).
+"""Tests for `boepie sync` (composite of `context fetch` -> `index fetch`
+(docs) + `corpus fetch --collection literature` -> `context apply`/`init`).
 
 `sync` adds no fetch logic of its own: it calls the same underlying seams
-the `knowledge fetch` and `index fetch` commands call
-(`boepie.cli.fetch_content`, `boepie.cli.download_verified_asset`), so those
-are what gets monkeypatched here. The final convergence step (`apply`/
-`init`) runs for real against a tmp INDEX_DIR, mirroring
-tests/test_cli_knowledge.py.
+the `context fetch`, `index fetch` and `corpus fetch --collection
+literature` commands call (`boepie.cli.fetch_content`,
+`boepie.cli.download_verified_asset`, `boepie.cli.sync_literature`), so
+those are what gets monkeypatched here. The final convergence step
+(`apply`/`init`) runs for real against a tmp INDEX_DIR, mirroring
+tests/test_cli_context.py.
 """
 
 from __future__ import annotations
@@ -14,10 +15,12 @@ from __future__ import annotations
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 from click.testing import CliRunner
 
 from boepie import cli
+from boepie.context import ContentFetchResult
 
 
 @pytest.fixture
@@ -34,6 +37,17 @@ def tmp_index_dir(tmp_path: Path) -> Path:
     return index_dir
 
 
+@pytest.fixture(autouse=True)
+def _isolate_literature(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every test in this module exercises sync's step ordering, not the real
+    arXiv fetch or the developer's own machine state: point LITERATURE_DIR at
+    an empty tmp directory (so the post-fetch index build is skipped - see
+    `sync`'s `if LITERATURE_DIR.exists()` guard) and stub the one call that
+    would otherwise hit arxiv.org/ar5iv."""
+    monkeypatch.setattr(cli, "LITERATURE_DIR", tmp_path / "literature-corpus-unused")
+    monkeypatch.setattr(cli, "sync_literature", MagicMock(return_value=[]))
+
+
 def _failing_fetch_content(tag: str = "latest") -> Path:
     raise ValueError("simulated content-fetch failure")
 
@@ -42,8 +56,16 @@ def _failing_download_verified_asset(tag: str, asset_name: str) -> bytes:
     raise ValueError(f"simulated download failure for {asset_name}")
 
 
+def _failing_sync_literature(collection_dir, manifest, **kwargs) -> list:
+    # `_sync_network_step` only treats (SystemExit, httpx.HTTPError) as a
+    # warn-and-continue network failure - the same shape a real network
+    # outage would raise, before `fetch_paper`'s own per-source handling of
+    # httpx.HTTPError ever gets a chance to swallow it.
+    raise httpx.HTTPError("simulated arxiv-fetch failure")
+
+
 # ---------------------------------------------------------------------------
-# step order: knowledge fetch -> index fetch (per collection) -> apply/init
+# step order: context fetch -> index fetch (per collection) -> apply/init
 # ---------------------------------------------------------------------------
 
 
@@ -52,11 +74,13 @@ def test_sync_runs_steps_in_order_and_still_initializes_on_full_network_failure(
 ) -> None:
     """With every network leg failing, sync still converges the bundle by
     calling `init` (no prior `.boepie/`), and the warnings appear in the
-    documented order: knowledge fetch, then index fetch per collection, then
-    the final init. Uses --verbose since the per-step "Initialized" message
-    is otherwise suppressed by the default one-line summary."""
+    documented order: context fetch, then docs index fetch, then literature
+    fetch, then the final init. Uses --verbose since the per-step
+    "Initialized" message is otherwise suppressed by the default one-line
+    summary."""
     monkeypatch.setattr(cli, "fetch_content", _failing_fetch_content)
     monkeypatch.setattr(cli, "download_verified_asset", _failing_download_verified_asset)
+    monkeypatch.setattr(cli, "sync_literature", _failing_sync_literature)
     monkeypatch.setattr(cli, "INDEX_DIR", tmp_index_dir)
 
     result = runner.invoke(cli.cli, ["sync", "--verbose", "--directory", str(tmp_path)])
@@ -64,12 +88,12 @@ def test_sync_runs_steps_in_order_and_still_initializes_on_full_network_failure(
     assert result.exit_code == 0, result.output
     output = result.output
 
-    knowledge_fetch_pos = output.index("knowledge fetch --tag latest failed")
-    literature_fetch_pos = output.index("index fetch --collection literature --tag latest failed")
+    context_fetch_pos = output.index("context fetch --tag latest failed")
     docs_fetch_pos = output.index("index fetch --collection docs --tag latest failed")
+    literature_fetch_pos = output.index("corpus fetch --collection literature failed")
     initialized_pos = output.index("Initialized")
 
-    assert knowledge_fetch_pos < literature_fetch_pos < docs_fetch_pos < initialized_pos
+    assert context_fetch_pos < docs_fetch_pos < literature_fetch_pos < initialized_pos
     assert (tmp_path / ".boepie" / "manifest.json").exists()
 
 
@@ -78,19 +102,19 @@ def test_sync_runs_steps_in_order_and_still_initializes_on_full_network_failure(
 # ---------------------------------------------------------------------------
 
 
-def test_sync_only_knowledge_never_calls_index_fetch(
+def test_sync_only_context_never_calls_index_fetch(
     runner: CliRunner, tmp_path: Path, tmp_index_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """--only knowledge should skip the index-fetch half entirely."""
+    """--only context should skip the index-fetch half entirely."""
     fake_fetch_content = MagicMock(
-        return_value=cli.ContentFetchResult(content_dir=tmp_path / "content-cache", changed=True)
+        return_value=ContentFetchResult(content_dir=tmp_path / "content-cache", changed=True)
     )
     fake_download = MagicMock(side_effect=AssertionError("download_verified_asset should not be called"))
     monkeypatch.setattr(cli, "fetch_content", fake_fetch_content)
     monkeypatch.setattr(cli, "download_verified_asset", fake_download)
     monkeypatch.setattr(cli, "INDEX_DIR", tmp_index_dir)
 
-    result = runner.invoke(cli.cli, ["sync", "--only", "knowledge", "--directory", str(tmp_path)])
+    result = runner.invoke(cli.cli, ["sync", "--only", "context", "--directory", str(tmp_path)])
 
     assert result.exit_code == 0, result.output
     fake_fetch_content.assert_called_once()
@@ -101,18 +125,19 @@ def test_sync_only_knowledge_never_calls_index_fetch(
 def test_sync_only_indices_never_touches_the_bundle(
     runner: CliRunner, tmp_path: Path, tmp_index_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """--only indices should skip both `knowledge fetch` and `apply`/`init`."""
+    """--only indices should skip both `context fetch` and `apply`/`init`."""
     fake_fetch_content = MagicMock(side_effect=AssertionError("fetch_content should not be called"))
     monkeypatch.setattr(cli, "fetch_content", fake_fetch_content)
     monkeypatch.setattr(cli, "download_verified_asset", _failing_download_verified_asset)
+    monkeypatch.setattr(cli, "sync_literature", _failing_sync_literature)
     monkeypatch.setattr(cli, "INDEX_DIR", tmp_index_dir)
 
     result = runner.invoke(cli.cli, ["sync", "--only", "indices", "--directory", str(tmp_path)])
 
     assert result.exit_code == 0, result.output
     fake_fetch_content.assert_not_called()
-    assert "index fetch --collection literature --tag latest failed" in result.output
     assert "index fetch --collection docs --tag latest failed" in result.output
+    assert "corpus fetch --collection literature failed" in result.output
     assert not (tmp_path / ".boepie").exists()
 
 
@@ -128,7 +153,7 @@ def test_sync_calls_apply_not_init_when_bundle_already_exists(
     (which would raise FileExistsError). Uses --verbose to see which of the
     two ran."""
     monkeypatch.setattr(cli, "INDEX_DIR", tmp_index_dir)
-    init_result = runner.invoke(cli.cli, ["knowledge", "init", "--directory", str(tmp_path)])
+    init_result = runner.invoke(cli.cli, ["context", "init", "--directory", str(tmp_path)])
     assert init_result.exit_code == 0, init_result.output
 
     monkeypatch.setattr(cli, "fetch_content", _failing_fetch_content)
@@ -144,12 +169,12 @@ def test_sync_calls_apply_not_init_when_bundle_already_exists(
 def test_sync_failing_content_fetch_still_completes_apply_from_seeds(
     runner: CliRunner, tmp_path: Path, tmp_index_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A failing `knowledge fetch` warns but does not block `apply`, which
+    """A failing `context fetch` warns but does not block `apply`, which
     still converges the bundle from whatever content is already resolvable
     (the packaged seeds, absent a populated cache). Uses --verbose to see
     the "Applied" message alongside the warning."""
     monkeypatch.setattr(cli, "INDEX_DIR", tmp_index_dir)
-    init_result = runner.invoke(cli.cli, ["knowledge", "init", "--directory", str(tmp_path)])
+    init_result = runner.invoke(cli.cli, ["context", "init", "--directory", str(tmp_path)])
     assert init_result.exit_code == 0, init_result.output
 
     monkeypatch.setattr(cli, "fetch_content", _failing_fetch_content)
@@ -159,7 +184,7 @@ def test_sync_failing_content_fetch_still_completes_apply_from_seeds(
 
     assert result.exit_code == 0, result.output
     assert "Warning" in result.output
-    assert "knowledge fetch --tag latest failed" in result.output
+    assert "context fetch --tag latest failed" in result.output
     assert "Applied" in result.output
     assert (tmp_path / ".boepie" / "manifest.json").exists()
 
@@ -186,7 +211,7 @@ def test_sync_default_run_prints_one_line_summary_not_step_detail(
     assert "Initialized" not in result.output
     assert "Fetched" not in result.output
     assert "Indexed" not in result.output
-    assert "knowledge fetch --tag latest failed" in result.output
+    assert "context fetch --tag latest failed" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -197,11 +222,17 @@ def test_sync_default_run_prints_one_line_summary_not_step_detail(
 def test_sync_tag_passes_through_to_both_fetch_kinds(
     runner: CliRunner, tmp_path: Path, tmp_index_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """--tag must reach both `fetch_content` and `download_verified_asset`."""
+    """--tag must reach both `fetch_content` and `download_verified_asset`.
+
+    `corpus fetch --collection literature` has no --tag of its own (arXiv
+    fetch is not a release asset), so only the context and docs-index legs
+    are release-tagged; the docs leg is the sole remaining
+    `download_verified_asset` call.
+    """
     observed_tags: list[str] = []
 
     def _recording_fetch_content(tag: str = "latest") -> Path:
-        observed_tags.append(f"knowledge:{tag}")
+        observed_tags.append(f"context:{tag}")
         raise ValueError("stop before touching the real cache")
 
     def _recording_download(tag: str, asset_name: str) -> bytes:
@@ -215,8 +246,8 @@ def test_sync_tag_passes_through_to_both_fetch_kinds(
     result = runner.invoke(cli.cli, ["sync", "--tag", "v1.2.3", "--directory", str(tmp_path)])
 
     assert result.exit_code == 0, result.output
-    assert "knowledge:v1.2.3" in observed_tags
-    assert observed_tags.count("index:v1.2.3") == 2
+    assert "context:v1.2.3" in observed_tags
+    assert observed_tags.count("index:v1.2.3") == 1
 
 
 # ---------------------------------------------------------------------------

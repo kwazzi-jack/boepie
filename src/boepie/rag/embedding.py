@@ -27,6 +27,7 @@ from typing import Callable, Literal
 import click
 import numpy as np
 
+from boepie._display import CliError
 from boepie.config import (
     EMBEDDING_BINDING,
     EMBEDDING_CACHE_DIR,
@@ -191,11 +192,11 @@ def validate_host(kind: str, host: str | None, flag: str = "--embedding-host") -
     requires a URL host. openai's host is an optional base_url override - ``None``
     means the real API, but a given value must still be a URL (e.g. a local
     vLLM/SGLang/TGI). Failing fast here beats discovering it after burning real
-    calls deep inside a build. Raises ``click.ClickException`` on a bad value.
+    calls deep inside a build. Raises ``boepie._display.CliError`` on a bad value.
     """
     if kind == "fastembed":
         if host is not None:
-            raise click.ClickException(
+            raise CliError(
                 f"{flag} is not used for --*-binding=fastembed (it runs a local "
                 f"ONNX model, no server). Omit {flag} or switch --*-binding."
             )
@@ -207,11 +208,11 @@ def validate_host(kind: str, host: str | None, flag: str = "--embedding-host") -
                  "http://localhost:8000/v1 for a local vLLM), or omit it entirely "
                  "to use the real OpenAI API"
         )
-        raise click.ClickException(
+        raise CliError(
             f"{flag}={host!r} doesn't look like a URL. For {kind}, {flag} must be {hint}."
         )
     if kind == "ollama" and host is None:
-        raise click.ClickException(f"{flag} is required for --*-binding=ollama.")
+        raise CliError(f"{flag} is required for --*-binding=ollama.")
 
 
 # A zero-arg (optionally `max_async`-taking) callable the decorator injects, so

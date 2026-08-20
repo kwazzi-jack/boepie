@@ -19,6 +19,7 @@ from boepie.rag.embedding import (
 )
 from boepie.rag.engine import (
     BuildManifest,
+    EmptyCollectionError,
     DocumentSpan,
     QueryHandle,
     build,
@@ -31,7 +32,7 @@ from boepie.rag.engine import (
     read_span,
     search,
 )
-from boepie.rag.loaders import DocsLoader, KnowledgeLoader, LiteratureLoader, Loader
+from boepie.rag.loaders import ContextLoader, DocsLoader, LiteratureLoader, Loader, NotesLoader
 from boepie.rag.models import Chunk, Document, Filter, SearchResult
 
 __all__ = [
@@ -45,6 +46,7 @@ __all__ = [
     "read_span",
     "ModelBinding",
     "BuildManifest",
+    "EmptyCollectionError",
     "DocumentSpan",
     "QueryHandle",
     "default_embedding_binding",
@@ -55,7 +57,8 @@ __all__ = [
     "Loader",
     "LiteratureLoader",
     "DocsLoader",
-    "KnowledgeLoader",
+    "ContextLoader",
+    "NotesLoader",
     "Document",
     "Chunk",
     "SearchResult",

@@ -13,9 +13,9 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from boepie.runner import RunResult
-from boepie.tools import pipeline
-from boepie.tools.pipeline import (
+from boepie.pipeline.runner import RunResult
+from boepie.pipeline import recipe as pipeline
+from boepie.pipeline.recipe import (
     RunRecipeInput,
     ValidateRecipeInput,
     run_recipe,

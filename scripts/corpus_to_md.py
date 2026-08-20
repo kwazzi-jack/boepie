@@ -36,6 +36,20 @@ Features:
 - Mathematical precision checking (chktex integration).
 - Internal link stripping (preserves external).
 - Optional figure captioning, reusing the chosen provider.
+
+This is the BYO-PDF path, opt-in and run entirely on your own machine: for
+arXiv papers, prefer `boepie literature fetch` instead (fetches + converts
+arXiv's own HTML rendering - no OCR, no GPU, no API key, and no PDF to
+source). Reach for this script when a paper is not on arXiv, or you
+specifically need marker's OCR/layout fidelity, for a PDF you have the right
+to convert (your own copy, an author-shared preprint, institutional access,
+...); the resulting Markdown is exactly as redistributable, or not, as the
+PDF you fed it, and that judgment call is yours, not boepie's. Nothing this
+script produces is published by boepie: it has never been part of a
+maintainer-run release step. Its output uses the same
+`{citekey}/{citekey}.md` + `metadata.json` layout `boepie literature fetch`
+writes, so the two merge into one corpus for `boepie index build
+--collection literature`.
 """
 
 import importlib

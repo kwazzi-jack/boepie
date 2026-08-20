@@ -12,9 +12,16 @@ into a release-ready tarball + sha256 sidecar, matching the layout
 single top-level `{index_id}/` directory, plus a `.sha256` sidecar with the
 tarball's checksum.
 
+`literature` is not published this way: boepie does not redistribute paper
+text, even in built-index form (see `boepie.literature.fetch` - every
+machine fetches from arXiv and builds its own index locally via `boepie
+literature fetch` + `boepie index build --collection literature`). This
+script is for `docs` (and any future collection whose corpus boepie is
+actually allowed to redistribute).
+
 Usage:
-    uv run scripts/package_index.py .index/literature/ollama-nomic-embed-text \\
-        --collection literature --out dist/
+    uv run scripts/package_index.py .index/docs/fastembed-baai-bge-small-en-v1-5 \\
+        --collection docs --out dist/
 """
 
 from __future__ import annotations

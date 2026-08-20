@@ -8,13 +8,14 @@ new source (e.g. plain-text docs) means writing one more loader here.
 
 from __future__ import annotations
 
-import hashlib
 import json
-import re
 from pathlib import Path
 from typing import Any, Iterable, Protocol, runtime_checkable
 
-from boepie.config import DOCS_DIR, LITERATURE_DIR
+from boepie.config import DOCS_DIR, LITERATURE_DIR, NOTES_DIR
+from boepie.corpus.document import read_document
+from boepie.corpus.layout import DocumentLocation
+from boepie.corpus.layout import iter_documents as iter_corpus_documents
 from boepie.rag.chunking import resolve_image_refs
 from boepie.rag.models import Document
 
@@ -44,164 +45,184 @@ class SourceDescribing(Protocol):
     def describe_sources(self) -> dict[str, Any]: ...
 
 
-class LiteratureLoader:
-    """Loads the markdown literature corpus under ``stimela-corpus/``.
+class _CorpusLoader:
+    """Shared walk over a machine-global corpus collection.
 
-    Each document is a directory ``{citekey}/`` holding ``{citekey}.md``,
-    a ``metadata.json`` (citekey/title/author/year/doi/...) and an
-    ``images/`` subdirectory. Image references in the markdown are resolved
-    to real files and attached to the document metadata.
+    `literature`, `docs` and `notes` share one on-disk shape (see
+    `boepie.corpus.layout`): a `.md` file is a document, a directory holding
+    `content.md` is a document with assets, and any other directory is a
+    user-created group to recurse into. One walk covers all three; what
+    differs per collection is only the frontmatter block each carries, which
+    passes through to `Document.metadata` untouched for filters to reach with
+    dotted paths.
+
+    A document whose frontmatter carries no `id` is skipped rather than
+    raising: that is the pre-migration signal (see
+    `scripts/migrate_corpus_layout.py`), and a half-migrated corpus should
+    build what it can rather than abort.
+    """
+
+    name: str
+
+    def __init__(self, corpus_dir: Path | str) -> None:
+        self.corpus_dir = Path(corpus_dir)
+
+    def iter_documents(self) -> Iterable[Document]:
+        for location in iter_corpus_documents(self.corpus_dir, collection=self.name):
+            try:
+                document = read_document(location.md_path)
+            except ValueError:
+                continue
+
+            metadata: dict[str, Any] = dict(document.frontmatter)
+            # Assets live inside a wrapped document's own directory; a bare
+            # leaf has nowhere to put them, so it resolves to none rather
+            # than reaching into its enclosing group and picking up a
+            # sibling's images.
+            metadata["images"] = resolve_image_refs(document.body, document.wrapper_dir)
+            # The group path this document sits under, recorded explicitly
+            # rather than left to be re-derived from `source_path`: that path
+            # is absolute and machine-specific (it is why `relative_source`
+            # exists), so an index built on one machine could not be filtered
+            # by group on another. "" is the collection root.
+            metadata["group"] = self._group_of(location)
+
+            yield Document(
+                id=document.id,
+                text=document.body,
+                source_path=str(document.md_path),
+                base_path=str(document.wrapper_dir) if document.wrapper_dir else None,
+                metadata=metadata,
+            )
+
+    def _group_of(self, location: DocumentLocation) -> str:
+        """`location`'s group as a `/`-joined path relative to the corpus root.
+
+        A wrapped document's own directory is the document, not a group, so
+        the anchor is the wrapper when there is one and the file otherwise.
+        """
+        anchor = location.wrapper_dir or location.md_path
+        try:
+            relative = anchor.parent.relative_to(self.corpus_dir)
+        except ValueError:
+            return ""
+        return "" if relative == Path(".") else relative.as_posix()
+
+    def describe_sources(self) -> dict[str, Any]:
+        return {"corpus_dir": self.corpus_dir.name}
+
+
+class LiteratureLoader(_CorpusLoader):
+    """Loads the paper corpus under ``LITERATURE_DIR``.
+
+    Every document here was fetched and converted on this machine (see
+    `boepie.literature.fetch`); boepie never ships converted paper text, so
+    there is no prebuilt index to describe and no bibliography file to
+    fingerprint - the packaged manifest naming which arXiv ids to pull is the
+    only thing boepie itself publishes.
     """
 
     name = "literature"
 
     def __init__(self, corpus_dir: Path | str = LITERATURE_DIR) -> None:
-        self.corpus_dir = Path(corpus_dir)
-
-    def iter_documents(self) -> Iterable[Document]:
-        for doc_dir in sorted(p for p in self.corpus_dir.iterdir() if p.is_dir()):
-            md_path = doc_dir / f"{doc_dir.name}.md"
-            if not md_path.exists():
-                continue
-
-            text = md_path.read_text(encoding="utf-8")
-            metadata = self._read_metadata(doc_dir)
-            metadata["images"] = resolve_image_refs(text, doc_dir)
-
-            yield Document(
-                id=doc_dir.name,
-                text=text,
-                source_path=str(md_path),
-                base_path=str(doc_dir),
-                metadata=metadata,
-            )
+        super().__init__(corpus_dir)
 
     def describe_sources(self) -> dict[str, Any]:
-        """Which bibliography this corpus was extracted from.
+        """Which papers the packaged manifest names, alongside the corpus dir.
 
-        ``corpus.bib`` is the BibTeX file the PDFs were collected against, and
-        it is the only place the corpus's citekeys carry titles/DOIs as a set
-        rather than one per-paper ``metadata.json``. Its entry count is
-        reported alongside the indexed citekeys precisely so the two can
-        disagree visibly: a bib entry whose PDF was never converted leaves no
-        other trace.
-
-        ``content`` carries the file verbatim. Nothing at query time reads it -
-        it is there so a shipped index tarball is a complete record of what it
-        was built from, recoverable with::
-
-            jq -r '.sources.bibtex.content' manifest.json > corpus.bib
+        Reported so a built index carries a record of what boepie's own
+        default corpus was at build time, which the indexed ids alone do not
+        say: a manifest entry whose paper failed to convert (no HTML rendering
+        at either arXiv or ar5iv) leaves no other trace.
         """
-        sources: dict[str, Any] = {"corpus_dir": self.corpus_dir.name}
+        from boepie.literature.manifest import load_default_manifest
 
-        bib_path = self.corpus_dir / "corpus.bib"
-        if bib_path.is_file():
-            raw = bib_path.read_bytes()
-            text = raw.decode("utf-8", "replace")
-            sources["bibtex"] = {
-                "path": bib_path.name,
-                "sha256": hashlib.sha256(raw).hexdigest(),
-                "entry_count": len(re.findall(r"^@\w+\s*\{", text, re.M)),
-                "content": text,
-            }
-        return sources
-
-    @staticmethod
-    def _read_metadata(doc_dir: Path) -> dict:
-        meta_path = doc_dir / "metadata.json"
-        if not meta_path.exists():
-            return {"citekey": doc_dir.name}
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        # Normalise the BibTeX-brace-wrapped title for display.
-        if "title" in meta:
-            meta["title"] = meta["title"].replace("{", "").replace("}", "").strip()
-        return meta
+        papers = load_default_manifest()
+        return {
+            "corpus_dir": self.corpus_dir.name,
+            "default_manifest": {
+                "entry_count": len(papers),
+                "citekeys": sorted(paper.citekey for paper in papers),
+            },
+        }
 
 
-# ---------------------------------------------------------------------------
+class NotesLoader(_CorpusLoader):
+    """Loads the user-added notes corpus under ``NOTES_DIR``.
+
+    Structurally the base case: notes carry the base frontmatter and nothing
+    else, are always ``managed_by: user``, and have no manifest to reconcile
+    against. Kept as its own collection rather than folded into the others so
+    a user's own material never competes with curated sources in a search.
+    """
+
+    name = "notes"
+
+    def __init__(self, corpus_dir: Path | str = NOTES_DIR) -> None:
+        super().__init__(corpus_dir)
 
 
-class DocsLoader:
-    """Loads the upstream documentation corpus under ``docs-corpus/``.
+class DocsLoader(_CorpusLoader):
+    """Loads the upstream documentation corpus under ``DOCS_DIR``.
 
-    Each project is a directory ``{project}/`` holding ``{project}/**/*.md``
-    pages and an optional ``{project}/metadata.json``
-    (project/version/base_url/...). Document IDs are ``{project}/{page}``,
-    where ``page`` is the extension-less path relative to the project
-    directory. Metadata from metadata.json is merged into every page's
-    metadata, along with a ``page`` field set to that same relative name.
-
-    Pages are found recursively because upstream docs sites nest them
-    (stimela publishes ``fundamentals/params``, ``reference/cabdefs``), and
-    that nesting is worth preserving: ``base_url`` joined with ``page`` plus
-    ``.html`` reconstructs the page's real URL.
+    Pages carry a ``docs`` frontmatter block (project/page/base_url/version),
+    so ``base_url`` joined with ``page`` plus ``.html`` still reconstructs the
+    live URL. Grouping by project is a directory group like any other, not a
+    special case in the walk.
     """
 
     name = "docs"
 
     def __init__(self, corpus_dir: Path | str = DOCS_DIR) -> None:
-        self.corpus_dir = Path(corpus_dir)
-
-    def iter_documents(self) -> Iterable[Document]:
-        for project_dir in sorted(p for p in self.corpus_dir.iterdir() if p.is_dir()):
-            project_metadata = self._read_metadata(project_dir)
-
-            for page_path in sorted(p for p in project_dir.rglob("*.md")):
-                text = page_path.read_text(encoding="utf-8")
-                page_name = page_path.relative_to(project_dir).with_suffix("").as_posix()
-                document_id = f"{project_dir.name}/{page_name}"
-
-                metadata: dict[str, Any] = project_metadata.copy()
-                metadata["page"] = page_name
-
-                yield Document(
-                    id=document_id,
-                    text=text,
-                    source_path=str(page_path),
-                    base_path=str(project_dir),
-                    metadata=metadata,
-                )
+        super().__init__(corpus_dir)
 
     def describe_sources(self) -> dict[str, Any]:
         """Which docs site, at which version, each project was scraped from.
 
         These pages are converted copies of someone else's rendered docs, so
-        the fact worth keeping is where and when: ``base_url`` plus a page name
-        reconstructs the live URL, and ``version``/``retrieved_at`` say which
-        snapshot of upstream the copy corresponds to. Written by
-        ``scripts/docs_to_md.py`` into each project's ``metadata.json``.
+        the fact worth keeping is where and when. Collected from the pages'
+        own frontmatter rather than a side file, so it describes what was
+        actually indexed rather than what a manifest intended.
         """
-        projects = [
-            self._read_metadata(project_dir)
-            for project_dir in sorted(p for p in self.corpus_dir.iterdir() if p.is_dir())
-        ]
-        return {"corpus_dir": self.corpus_dir.name, "projects": projects}
-
-    @staticmethod
-    def _read_metadata(project_dir: Path) -> dict[str, Any]:
-        metadata_path = project_dir / "metadata.json"
-        if not metadata_path.exists():
-            return {"project": project_dir.name}
-        return json.loads(metadata_path.read_text(encoding="utf-8"))
+        projects: dict[str, dict[str, Any]] = {}
+        for document in self.iter_documents():
+            docs_block = document.metadata.get("docs")
+            if not isinstance(docs_block, dict):
+                continue
+            project_name = str(docs_block.get("project", ""))
+            entry = projects.setdefault(
+                project_name,
+                {
+                    "project": project_name,
+                    "base_url": docs_block.get("base_url"),
+                    "version": docs_block.get("version"),
+                    "page_count": 0,
+                },
+            )
+            entry["page_count"] += 1
+        return {
+            "corpus_dir": self.corpus_dir.name,
+            "projects": [projects[name] for name in sorted(projects)],
+        }
 
 
 # ---------------------------------------------------------------------------
 
 
-class KnowledgeLoader:
-    """Loads the curated knowledge bundle from ``.boepie/``.
+class ContextLoader:
+    """Loads the curated context bundle from ``.boepie/``.
 
-    Each markdown file under the bundle directory (except log.md and anything
-    under a dot-directory such as the derived `.index/`) becomes one
+    Each markdown file under the bundle directory (except apply-log.md and
+    anything under a dot-directory such as the derived `.index/`) becomes one
     document. Document IDs are the POSIX relative path without the suffix
     (e.g. "concepts/substitution" for ".boepie/concepts/substitution.md").
-    Frontmatter is parsed using boepie.knowledge.frontmatter helpers into
+    Frontmatter is parsed using boepie.context.frontmatter helpers into
     Document.metadata. The body text (with frontmatter stripped) is the
     document text. index.md has no frontmatter (OKF reserved): it yields
     empty metadata and the full file as body text.
     """
 
-    name = "knowledge"
+    name = "context"
 
     def __init__(self, bundle_dir: Path | str) -> None:
         self.bundle_dir = Path(bundle_dir)
@@ -221,14 +242,15 @@ class KnowledgeLoader:
         return sources
 
     def iter_documents(self) -> Iterable[Document]:
-        from boepie.knowledge.frontmatter import read_frontmatter
+        from boepie.context.frontmatter import read_frontmatter
 
         md_paths = sorted(self.bundle_dir.rglob("*.md"))
         for md_path in md_paths:
-            # log.md is append-only bundle history; index.md is the navigation
-            # entry point the agent is told to read first anyway (its escalation
-            # table isn't a search answer). Neither belongs in the search corpus.
-            if md_path.name in ("log.md", "index.md"):
+            # apply-log.md is append-only bundle history; index.md is the
+            # navigation entry point the agent is told to read first anyway
+            # (its escalation table isn't a search answer). Neither belongs
+            # in the search corpus.
+            if md_path.name in ("apply-log.md", "index.md"):
                 continue
 
             relative_path = md_path.relative_to(self.bundle_dir)

@@ -3,7 +3,7 @@
 These commands are thin frontends over the same retrieval helpers the
 search_*/read_* MCP tools use, so the assertions here target parity of
 behaviour (routing, error messages) and the CLI-only additions: the `--json`
-machine-readable mode and cross-collection dispatch (literature/docs/knowledge
+machine-readable mode and cross-collection dispatch (literature/docs/context
 for search; literature/docs for read).
 
 Indices are built lexical-only (BM25, embedding=None) so the tests stay fully
@@ -22,9 +22,10 @@ import pytest
 from click.testing import CliRunner
 
 from boepie import cli
-from boepie.knowledge import index_root_for
+from boepie.context import index_root_for
 from boepie.rag import engine
-from boepie.rag.loaders import DocsLoader, KnowledgeLoader
+from boepie.rag.loaders import ContextLoader, DocsLoader
+from tests.conftest import write_corpus_document
 
 
 @pytest.fixture
@@ -44,22 +45,29 @@ _DOC_BODY = (
     "early parameter changes partway through a run.\n"
 )
 
-_KNOWLEDGE_FRONTMATTER = "---\ntype: Concept\ntitle: {title}\nmanaged: boepie\n---\n\n"
+_CONTEXT_FRONTMATTER = "---\ntype: Concept\ntitle: {title}\nmanaged_by: boepie\n---\n\n"
 
 
 def _write_docs_index(index_dir: Path, corpus_dir: Path) -> None:
-    project = corpus_dir / "stimela"
-    project.mkdir(parents=True)
-    (project / "metadata.json").write_text(json.dumps({"project": "stimela"}), encoding="utf-8")
-    (project / "recipes.md").write_text(_DOC_BODY, encoding="utf-8")
+    write_corpus_document(
+        corpus_dir,
+        document_id="doc0000001",
+        title="Recipes",
+        body=_DOC_BODY,
+        group="stimela",
+        origin="https://stimela.readthedocs.io/recipes.html",
+        via="sphinx",
+        source_format="html",
+        docs={"project": "stimela", "page": "recipes"},
+    )
     asyncio.run(engine.build(DocsLoader(corpus_dir), index_root=index_dir, embedding=None))
 
 
-def _write_knowledge_bundle(bundle_dir: Path) -> None:
+def _write_context_bundle(bundle_dir: Path) -> None:
     page = bundle_dir / "playbooks" / "imaging.md"
     page.parent.mkdir(parents=True, exist_ok=True)
     page.write_text(
-        _KNOWLEDGE_FRONTMATTER.format(title="Imaging strategy")
+        _CONTEXT_FRONTMATTER.format(title="Imaging strategy")
         + "# Imaging strategy\n\nA stimela imaging pipeline chains wsclean multiscale "
         "clean with successive masking rounds to recover faint extended emission.\n",
         encoding="utf-8",
@@ -67,7 +75,7 @@ def _write_knowledge_bundle(bundle_dir: Path) -> None:
     (bundle_dir / "manifest.json").write_text(
         json.dumps({"bundle_version": "0.1.0"}), encoding="utf-8"
     )
-    asyncio.run(engine.build(KnowledgeLoader(bundle_dir), index_root=index_root_for(bundle_dir), embedding=None))
+    asyncio.run(engine.build(ContextLoader(bundle_dir), index_root=index_root_for(bundle_dir), embedding=None))
 
 
 @pytest.fixture
@@ -92,11 +100,11 @@ def empty_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.fixture
-def knowledge_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A knowledge bundle with its own index, run from inside the project."""
+def context_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A context bundle with its own index, run from inside the project."""
     project_dir = tmp_path / "project"
     bundle_dir = project_dir / ".boepie"
-    _write_knowledge_bundle(bundle_dir)
+    _write_context_bundle(bundle_dir)
     monkeypatch.chdir(project_dir)
     yield bundle_dir
     asyncio.run(engine.clear_cache())
@@ -113,9 +121,9 @@ def test_search_docs_text_lists_hits(runner: CliRunner, docs_index: Path) -> Non
     )
     assert result.exit_code == 0, result.output
     assert 'hits for "wsclean imaging" in docs' in result.output
-    assert "[1] stimela/recipes" in result.output
+    assert "[1] stimela: Recipes" in result.output
     # F2 read handle line is present for docs (it has a read_* tool).
-    assert "read: document_id=stimela/recipes" in result.output
+    assert "read: document_id=doc0000001" in result.output
 
 
 def test_search_docs_text_shows_raw_per_leg_score_detail(runner: CliRunner, docs_index: Path) -> None:
@@ -131,12 +139,12 @@ def test_search_docs_text_shows_raw_per_leg_score_detail(runner: CliRunner, docs
     assert "cos=" not in hit_line  # no dense leg ran in mode='bm25'
 
 
-def test_search_knowledge_text_uses_bundle_paths(runner: CliRunner, knowledge_project: Path) -> None:
-    result = runner.invoke(cli.cli, ["search", "wsclean imaging", "--collection", "knowledge"])
+def test_search_context_text_uses_bundle_paths(runner: CliRunner, context_project: Path) -> None:
+    result = runner.invoke(cli.cli, ["search", "wsclean imaging", "--collection", "context"])
     assert result.exit_code == 0, result.output
-    assert "in knowledge" in result.output
+    assert "in context" in result.output
     assert "source: .boepie/playbooks/imaging.md" in result.output
-    # Knowledge has no read tool: no read handle line.
+    # Context has no read tool: no read handle line.
     assert "read:" not in result.output
 
 
@@ -152,11 +160,11 @@ def test_search_docs_json_is_machine_readable(runner: CliRunner, docs_index: Pat
     )
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
-    assert payload["collection"] == "docs"
+    assert payload["collections"] == ["docs"]
     assert payload["question"] == "wsclean imaging"
     assert payload["hits"]
     top = payload["hits"][0]
-    assert top["document_id"] == "stimela/recipes"
+    assert top["document_id"] == "doc0000001"
     assert top["rank"] == 1
     assert top["read_handle"] is True
     assert isinstance(top["rrf_score"], float)
@@ -165,24 +173,24 @@ def test_search_docs_json_is_machine_readable(runner: CliRunner, docs_index: Pat
     assert "chars" not in top["source"]  # source is a clean relative path
 
 
-def test_search_knowledge_json_marks_no_read_handle(runner: CliRunner, knowledge_project: Path) -> None:
+def test_search_context_json_marks_no_read_handle(runner: CliRunner, context_project: Path) -> None:
     result = runner.invoke(
-        cli.cli, ["search", "imaging", "--collection", "knowledge", "--json"]
+        cli.cli, ["search", "imaging", "--collection", "context", "--json"]
     )
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
-    assert payload["collection"] == "knowledge"
+    assert payload["collections"] == ["context"]
     assert payload["hits"][0]["read_handle"] is False
     assert payload["hits"][0]["source"].startswith(".boepie/")
 
 
-def test_search_knowledge_json_carries_bm25_score_and_null_dense_score(
-    runner: CliRunner, knowledge_project: Path
+def test_search_context_json_carries_bm25_score_and_null_dense_score(
+    runner: CliRunner, context_project: Path
 ) -> None:
-    # knowledge is BM25-only: the raw bm25 leg is populated, the dense leg
+    # context is BM25-only: the raw bm25 leg is populated, the dense leg
     # never ran so dense_score stays null.
     result = runner.invoke(
-        cli.cli, ["search", "imaging", "--collection", "knowledge", "--json"]
+        cli.cli, ["search", "imaging", "--collection", "context", "--json"]
     )
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
@@ -217,15 +225,15 @@ def test_search_missing_index_names_the_fix(runner: CliRunner, empty_index: Path
     assert "index build --collection docs" in result.output
 
 
-def test_search_knowledge_without_bundle_says_init(
+def test_search_context_without_bundle_says_init(
     runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     empty = tmp_path / "not-a-project"
     empty.mkdir()
     monkeypatch.chdir(empty)
-    result = runner.invoke(cli.cli, ["search", "anything", "--collection", "knowledge"])
+    result = runner.invoke(cli.cli, ["search", "anything", "--collection", "context"])
     assert result.exit_code != 0
-    assert "boepie knowledge init" in result.output
+    assert "boepie context init" in result.output
 
 
 def test_search_rejects_unknown_collection(runner: CliRunner) -> None:
@@ -241,36 +249,36 @@ def test_search_rejects_unknown_collection(runner: CliRunner) -> None:
 
 def test_read_docs_text_returns_span(runner: CliRunner, docs_index: Path) -> None:
     result = runner.invoke(
-        cli.cli, ["read", "stimela/recipes", "--collection", "docs"]
+        cli.cli, ["read", "doc0000001", "--collection", "docs"]
     )
     assert result.exit_code == 0, result.output
-    assert "document_id=stimela/recipes" in result.output
-    assert "source: stimela/recipes.md" in result.output
+    assert "document_id=doc0000001" in result.output
+    assert "source: stimela/Recipes.md" in result.output
     assert "wsclean" in result.output
 
 
 def test_read_docs_json_carries_text_and_provenance(runner: CliRunner, docs_index: Path) -> None:
     result = runner.invoke(
-        cli.cli, ["read", "stimela/recipes", "--collection", "docs", "--json"]
+        cli.cli, ["read", "doc0000001", "--collection", "docs", "--json"]
     )
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
-    assert payload["document_id"] == "stimela/recipes"
-    assert payload["source"] == "stimela/recipes.md"
+    assert payload["document_id"] == "doc0000001"
+    assert payload["source"] == "stimela/Recipes.md"
     assert "wsclean" in payload["text"]
 
 
 def test_read_bad_document_id_points_to_search(runner: CliRunner, docs_index: Path) -> None:
     result = runner.invoke(
-        cli.cli, ["read", "stimela/nope", "--collection", "docs"]
+        cli.cli, ["read", "nosuchid99", "--collection", "docs"]
     )
     assert result.exit_code != 0
     assert "boepie search --collection docs" in result.output
 
 
-def test_read_rejects_knowledge_collection(runner: CliRunner) -> None:
-    # knowledge has no read counterpart; the choice must not accept it.
-    result = runner.invoke(cli.cli, ["read", "x", "--collection", "knowledge"])
+def test_read_rejects_context_collection(runner: CliRunner) -> None:
+    # context has no read counterpart; the choice must not accept it.
+    result = runner.invoke(cli.cli, ["read", "x", "--collection", "context"])
     assert result.exit_code != 0
 
 

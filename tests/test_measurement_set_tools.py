@@ -14,9 +14,9 @@ import pytest
 from fastmcp import Client
 from fastmcp.client.transports import FastMCPTransport
 
-from boepie.ms import MSInfo
-from boepie.tools import measurement_set
-from boepie.tools.measurement_set import (
+from boepie.pipeline.ms import MSInfo
+from boepie.pipeline import measurement_set
+from boepie.pipeline.measurement_set import (
     GetMsFieldsInput,
     GetMsInfoInput,
     _expand_sections,

@@ -8,13 +8,68 @@ any dependency on the tools under test.
 from __future__ import annotations
 
 import fnmatch
+from pathlib import Path
+from typing import Any
 
 import pytest
 from fastmcp import Client
 
 from boepie.config import BUNDLE_DIR_ENV_VAR
-from boepie.runner import CabSchema, list_cab_names, load_cab_schema
+from boepie.corpus.document import write_leaf_document
+from boepie.corpus.layout import full_title_filename
+from boepie.corpus.schema import Source
+from boepie.pipeline.runner import CabSchema, list_cab_names, load_cab_schema
 from boepie.server import mcp
+
+
+# ---------------------------------------------------------------------------
+# Corpus fixtures
+# ---------------------------------------------------------------------------
+
+
+def write_corpus_document(
+    collection_dir: Path,
+    *,
+    document_id: str,
+    title: str,
+    body: str,
+    managed_by: str = "boepie",
+    origin: str = "https://example.test/source",
+    via: str = "verbatim",
+    source_format: str = "markdown",
+    group: str | None = None,
+    assets: dict[str, bytes] | None = None,
+    **blocks: Any,
+) -> Path:
+    """Write one document in the real corpus layout, for tests to build a
+    corpus the loaders actually understand.
+
+    Goes through `write_leaf_document` and the `schema` models rather than
+    hand-rolling frontmatter, so a fixture cannot drift from what production
+    writes - which is exactly how the pre-Phase-4 fixtures ended up describing
+    a layout nothing read any more. `blocks` carries the collection-specific
+    namespaced mapping (`bib=...` for literature, `docs=...` for docs).
+
+    Returns the path actually written, which is one level deeper than the
+    nominal target when `assets` forces a wrapped document.
+    """
+    source = Source(origin=origin, via=via, format=source_format)
+    frontmatter: dict[str, Any] = {
+        "title": title,
+        "managed_by": managed_by,
+        "source": source.model_dump(mode="json", by_alias=True, exclude_none=True),
+    }
+    frontmatter.update(blocks)
+
+    target_dir = collection_dir / group if group else collection_dir
+    document = write_leaf_document(
+        target_dir / full_title_filename(title),
+        document_id=document_id,
+        frontmatter_fields=frontmatter,
+        body=body,
+        assets=assets,
+    )
+    return document.md_path
 
 
 # ---------------------------------------------------------------------------

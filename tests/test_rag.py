@@ -8,10 +8,13 @@ function so it stays offline too.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from boepie.rag.chunking import chunk_document, resolve_image_refs
-from boepie.rag.loaders import DocsLoader, LiteratureLoader
+from boepie.rag.loaders import DocsLoader, LiteratureLoader, NotesLoader
 from boepie.rag.models import Chunk, Document, Filter, combine_filters
 from boepie.rag.search import _reciprocal_rank_fusion
+from tests.conftest import write_corpus_document
 
 # ---------------------------------------------------------------------------
 # Chunking
@@ -319,227 +322,375 @@ def test_combine_filters_is_and():
 
 
 # ---------------------------------------------------------------------------
-# DocsLoader
+# Corpus loaders (literature / docs / notes)
 # ---------------------------------------------------------------------------
-
-import json
-
-
-def test_docs_loader_document_ids(tmp_path):
-    """Document IDs should be {project}/{page}."""
-    corpus_dir = tmp_path / "docs-corpus"
-    corpus_dir.mkdir()
-
-    # Create two projects with pages.
-    project1_dir = corpus_dir / "project1"
-    project1_dir.mkdir()
-    (project1_dir / "page1.md").write_text("Content 1A", encoding="utf-8")
-    (project1_dir / "page2.md").write_text("Content 1B", encoding="utf-8")
-
-    project2_dir = corpus_dir / "project2"
-    project2_dir.mkdir()
-    (project2_dir / "page1.md").write_text("Content 2A", encoding="utf-8")
-
-    loader = DocsLoader(corpus_dir)
-    documents = list(loader.iter_documents())
-
-    # Should have 3 documents total.
-    assert len(documents) == 3
-
-    # Document IDs should have the correct format.
-    document_ids = {doc.id for doc in documents}
-    assert document_ids == {"project1/page1", "project1/page2", "project2/page1"}
+#
+# All three walk the shared corpus layout (see `boepie.corpus.layout`), so the
+# behaviour worth testing per loader is only what it adds on top: the
+# namespaced frontmatter block it carries through to metadata, and what its
+# `describe_sources` records. The walk itself - groups, wrapped documents,
+# skipped bookkeeping - is covered by tests/test_corpus_layout.py.
 
 
-def test_docs_loader_finds_nested_pages(tmp_path):
-    """Pages in subdirectories must be loaded, with the nesting kept in the id.
+def test_docs_loader_ids_are_surrogates_not_paths(tmp_path):
+    """A document is addressed by its frontmatter `id`, never by its location.
 
-    Upstream docs sites nest pages (stimela publishes `fundamentals/params`
-    and `reference/cabdefs`), so a flat glob would silently drop the bulk of
-    that corpus. The relative path is also what makes `base_url` + page +
-    '.html' resolve back to the real page.
+    The old loader derived an id from `{project}/{page}`, which meant moving
+    or renaming a page silently invalidated every read handle pointing at it.
     """
     corpus_dir = tmp_path / "docs-corpus"
-    project_dir = corpus_dir / "stimela"
-    (project_dir / "fundamentals").mkdir(parents=True)
-    (project_dir / "index.md").write_text("Top level", encoding="utf-8")
-    (project_dir / "fundamentals" / "params.md").write_text("Nested", encoding="utf-8")
+    write_corpus_document(
+        corpus_dir, document_id="aaaaaaaaa1", title="Page One", body="Content 1A",
+        group="project1", docs={"project": "project1", "page": "page1"},
+    )
+    write_corpus_document(
+        corpus_dir, document_id="aaaaaaaaa2", title="Page Two", body="Content 1B",
+        group="project1", docs={"project": "project1", "page": "page2"},
+    )
 
     documents = list(DocsLoader(corpus_dir).iter_documents())
 
-    assert {doc.id for doc in documents} == {
-        "stimela/index",
-        "stimela/fundamentals/params",
-    }
-    nested = next(doc for doc in documents if doc.id.endswith("params"))
-    assert nested.metadata["page"] == "fundamentals/params"
+    assert {document.id for document in documents} == {"aaaaaaaaa1", "aaaaaaaaa2"}
 
 
-def test_docs_loader_metadata_merge_with_file(tmp_path):
-    """Metadata from metadata.json should be merged into each document."""
+def test_docs_loader_carries_the_docs_block_into_metadata(tmp_path):
+    """Nested, not flattened: `Filter` reaches it with a dotted path."""
     corpus_dir = tmp_path / "docs-corpus"
-    corpus_dir.mkdir()
-
-    project_dir = corpus_dir / "project1"
-    project_dir.mkdir()
-    (project_dir / "page1.md").write_text("Content", encoding="utf-8")
-    (project_dir / "page2.md").write_text("More content", encoding="utf-8")
-
-    metadata_file = project_dir / "metadata.json"
-    metadata_file.write_text(
-        json.dumps({"project": "project1", "version": "1.2.3", "base_url": "https://docs.example.com"}),
-        encoding="utf-8",
+    write_corpus_document(
+        corpus_dir, document_id="aaaaaaaaa1", title="Recipes", body="Body.",
+        group="stimela",
+        docs={
+            "project": "stimela", "page": "recipes",
+            "base_url": "https://stimela.readthedocs.io/", "version": "1.3.0",
+        },
     )
 
-    loader = DocsLoader(corpus_dir)
-    documents = list(loader.iter_documents())
+    document = next(iter(DocsLoader(corpus_dir).iter_documents()))
 
-    assert len(documents) == 2
-
-    for doc in documents:
-        assert doc.metadata["project"] == "project1"
-        assert doc.metadata["version"] == "1.2.3"
-        assert doc.metadata["base_url"] == "https://docs.example.com"
-        # Each document should have its page name in metadata.
-        assert doc.metadata["page"] in {"page1", "page2"}
+    assert document.metadata["docs"]["project"] == "stimela"
+    assert document.metadata["docs"]["version"] == "1.3.0"
+    assert document.metadata["title"] == "Recipes"
 
 
-def test_docs_loader_metadata_default_without_file(tmp_path):
-    """Without metadata.json, should default to project name."""
+def test_docs_loader_finds_pages_at_any_nesting_depth(tmp_path):
+    """A group is any directory, so upstream nesting survives as groups."""
     corpus_dir = tmp_path / "docs-corpus"
-    corpus_dir.mkdir()
+    write_corpus_document(
+        corpus_dir, document_id="aaaaaaaaa1", title="Params", body="Nested.",
+        group="stimela/fundamentals",
+        docs={"project": "stimela", "page": "fundamentals/params"},
+    )
 
-    project_dir = corpus_dir / "project1"
-    project_dir.mkdir()
-    (project_dir / "page1.md").write_text("Content", encoding="utf-8")
-
-    loader = DocsLoader(corpus_dir)
-    documents = list(loader.iter_documents())
+    documents = list(DocsLoader(corpus_dir).iter_documents())
 
     assert len(documents) == 1
-    doc = documents[0]
-    assert doc.metadata["project"] == "project1"
-    assert doc.metadata["page"] == "page1"
-    # Should not have version or base_url since metadata.json didn't exist.
-    assert "version" not in doc.metadata
-    assert "base_url" not in doc.metadata
+    assert documents[0].metadata["docs"]["page"] == "fundamentals/params"
 
 
-def test_docs_loader_iteration_order_sorted(tmp_path):
-    """Projects and pages should be iterated in sorted order."""
+def test_docs_loader_body_excludes_frontmatter(tmp_path):
+    """Frontmatter is metadata, not searchable prose - indexing it would put
+    YAML keys into the lexical leg of every query."""
     corpus_dir = tmp_path / "docs-corpus"
-    corpus_dir.mkdir()
+    write_corpus_document(
+        corpus_dir, document_id="aaaaaaaaa1", title="Recipes", body="Just the body.",
+        group="stimela", docs={"project": "stimela", "page": "recipes"},
+    )
 
-    # Create projects in non-alphabetical order.
-    for proj_name in ["zebra", "alpha", "beta"]:
-        project_dir = corpus_dir / proj_name
-        project_dir.mkdir()
-        # Create pages in non-alphabetical order.
-        for page_name in ["z_page", "a_page", "m_page"]:
-            (project_dir / f"{page_name}.md").write_text(f"{proj_name}/{page_name}", encoding="utf-8")
+    document = next(iter(DocsLoader(corpus_dir).iter_documents()))
 
-    loader = DocsLoader(corpus_dir)
-    documents = list(loader.iter_documents())
-
-    # Should be 9 documents (3 projects * 3 pages).
-    assert len(documents) == 9
-
-    # Extract IDs to check order.
-    document_ids = [doc.id for doc in documents]
-
-    # Expect alphabetical order: alpha, beta, zebra (projects), then a_page, m_page, z_page (pages).
-    expected_ids = [
-        "alpha/a_page", "alpha/m_page", "alpha/z_page",
-        "beta/a_page", "beta/m_page", "beta/z_page",
-        "zebra/a_page", "zebra/m_page", "zebra/z_page",
-    ]
-    assert document_ids == expected_ids
+    assert document.text.strip() == "Just the body."
+    assert "managed_by" not in document.text
 
 
-def test_docs_loader_source_and_base_paths(tmp_path):
-    """source_path and base_path should be set correctly."""
+def test_docs_loader_source_path_points_at_the_markdown(tmp_path):
     corpus_dir = tmp_path / "docs-corpus"
-    corpus_dir.mkdir()
+    md_path = write_corpus_document(
+        corpus_dir, document_id="aaaaaaaaa1", title="Recipes", body="Body.",
+        group="stimela", docs={"project": "stimela", "page": "recipes"},
+    )
 
-    project_dir = corpus_dir / "project1"
-    project_dir.mkdir()
-    page_path = project_dir / "page1.md"
-    page_path.write_text("Content", encoding="utf-8")
+    document = next(iter(DocsLoader(corpus_dir).iter_documents()))
 
-    loader = DocsLoader(corpus_dir)
-    documents = list(loader.iter_documents())
-
-    assert len(documents) == 1
-    doc = documents[0]
-    assert doc.source_path == str(page_path)
-    assert doc.base_path == str(project_dir)
+    assert document.source_path == str(md_path)
+    # A bare leaf has no asset directory of its own, so it must not claim its
+    # enclosing group as one - that would resolve a sibling's images.
+    assert document.base_path is None
 
 
-# ---------------------------------------------------------------------------
-# Provenance (describe_sources)
-# ---------------------------------------------------------------------------
-
-
-def test_docs_loader_describes_each_project_source(tmp_path):
-    """Provenance carries the upstream URL/version per project, not per page.
-
-    A shipped docs index is a converted copy of someone else's site; without
-    base_url and the retrieval date there is nothing in the tarball saying
-    which snapshot it corresponds to.
-    """
+def test_docs_loader_wrapped_document_gets_its_wrapper_as_base_path(tmp_path):
     corpus_dir = tmp_path / "docs-corpus"
-    for name in ("quartical", "stimela"):
-        project_dir = corpus_dir / name
-        project_dir.mkdir(parents=True)
-        (project_dir / "index.md").write_text("Content", encoding="utf-8")
-        (project_dir / "metadata.json").write_text(
-            json.dumps(
-                {
-                    "project": name,
-                    "version": "latest",
-                    "base_url": f"https://{name}.readthedocs.io/en/latest/",
-                    "retrieved_at": "2026-07-28T00:00:00Z",
-                }
-            ),
-            encoding="utf-8",
+    write_corpus_document(
+        corpus_dir, document_id="aaaaaaaaa1", title="Recipes",
+        body="![fig](diagram.png)", group="stimela",
+        assets={"diagram.png": b"not-really-a-png"},
+        docs={"project": "stimela", "page": "recipes"},
+    )
+
+    document = next(iter(DocsLoader(corpus_dir).iter_documents()))
+
+    assert document.base_path is not None
+    assert document.base_path.endswith("Recipes")
+    assert document.metadata["images"] == [str(Path(document.base_path) / "diagram.png")]
+
+
+def test_docs_loader_describes_each_project_from_the_pages_themselves(tmp_path):
+    """Provenance comes from what was actually indexed, not a side file that
+    could disagree with it."""
+    corpus_dir = tmp_path / "docs-corpus"
+    for index, page in enumerate(("recipes", "cabs"), start=1):
+        write_corpus_document(
+            corpus_dir, document_id=f"stimela000{index}", title=f"Stimela {page}",
+            body="Body.", group="stimela",
+            docs={
+                "project": "stimela", "page": page,
+                "base_url": "https://stimela.readthedocs.io/", "version": "1.3.0",
+            },
         )
+    write_corpus_document(
+        corpus_dir, document_id="quartical01", title="Solvers", body="Body.",
+        group="quartical",
+        docs={"project": "quartical", "page": "solvers",
+              "base_url": "https://quartical.readthedocs.io/"},
+    )
 
     sources = DocsLoader(corpus_dir).describe_sources()
 
     assert sources["corpus_dir"] == "docs-corpus"
-    assert [project["project"] for project in sources["projects"]] == ["quartical", "stimela"]
-    assert sources["projects"][1]["base_url"] == "https://stimela.readthedocs.io/en/latest/"
-    assert sources["projects"][1]["retrieved_at"] == "2026-07-28T00:00:00Z"
+    projects = {entry["project"]: entry for entry in sources["projects"]}
+    assert projects["stimela"]["page_count"] == 2
+    assert projects["stimela"]["version"] == "1.3.0"
+    assert projects["quartical"]["page_count"] == 1
 
 
-def test_literature_loader_describes_bibliography(tmp_path):
-    """The bib's checksum and entry count are recorded next to the citekeys.
-
-    entry_count is deliberately the bib's own count rather than the number of
-    converted papers, so a bib entry with no corpus directory shows up as a
-    mismatch instead of vanishing.
-    """
-    corpus_dir = tmp_path / "stimela-corpus"
-    corpus_dir.mkdir()
-    bib_text = (
-        "@article{smirnov2011a,\n  title = {RIME I},\n}\n"
-        "@article{smirnov2011b,\n  title = {RIME II},\n}\n"
+def test_literature_loader_carries_the_bib_block(tmp_path):
+    corpus_dir = tmp_path / "literature"
+    write_corpus_document(
+        corpus_dir, document_id="smirnov0001", title="Revisiting the RIME",
+        body="Body.", origin="arxiv:1101.1111", via="ar5iv", source_format="html",
+        bib={"citekey": "smirnov2011", "year": "2011", "arxiv_id": "1101.1111"},
     )
-    (corpus_dir / "corpus.bib").write_text(bib_text, encoding="utf-8")
+
+    document = next(iter(LiteratureLoader(corpus_dir).iter_documents()))
+
+    assert document.id == "smirnov0001"
+    assert document.metadata["bib"]["citekey"] == "smirnov2011"
+    assert document.metadata["source"]["via"] == "ar5iv"
+
+
+def test_literature_loader_describes_the_packaged_manifest(tmp_path):
+    """boepie ships no converted paper text, so what a built index can record
+    is the manifest naming which arXiv ids it was meant to contain - a paper
+    that failed to convert leaves no other trace."""
+    corpus_dir = tmp_path / "literature"
+    corpus_dir.mkdir()
 
     sources = LiteratureLoader(corpus_dir).describe_sources()
 
-    assert sources["corpus_dir"] == "stimela-corpus"
-    assert sources["bibtex"]["path"] == "corpus.bib"
-    assert sources["bibtex"]["entry_count"] == 2
-    assert len(sources["bibtex"]["sha256"]) == 64
-    # Verbatim, so the shipped manifest alone reconstructs the bibliography.
-    assert sources["bibtex"]["content"] == bib_text
+    assert sources["corpus_dir"] == "literature"
+    assert sources["default_manifest"]["entry_count"] > 0
+    assert sources["default_manifest"]["citekeys"] == sorted(
+        sources["default_manifest"]["citekeys"]
+    )
 
 
-def test_literature_loader_omits_bibliography_when_absent(tmp_path):
-    """No bib file means no bibtex key - never a placeholder standing in for one."""
-    corpus_dir = tmp_path / "stimela-corpus"
+def test_notes_loader_adds_nothing_to_the_base_schema(tmp_path):
+    """Notes are the base case: no natural key, no namespaced block."""
+    corpus_dir = tmp_path / "notes"
+    write_corpus_document(
+        corpus_dir, document_id="note0000001", title="A Test Note", body="Body.",
+        managed_by="user", origin="/home/someone/note.md", via="verbatim",
+        source_format="markdown",
+    )
+
+    documents = list(NotesLoader(corpus_dir).iter_documents())
+
+    assert len(documents) == 1
+    assert documents[0].id == "note0000001"
+    assert documents[0].metadata["title"] == "A Test Note"
+    assert documents[0].metadata["managed_by"] == "user"
+    assert "slug" not in documents[0].metadata
+
+
+def test_notes_loader_recurses_into_user_groups(tmp_path):
+    corpus_dir = tmp_path / "notes"
+    write_corpus_document(
+        corpus_dir, document_id="note0000001", title="Deep Note", body="Body.",
+        managed_by="user", group="calibration/subtopic",
+    )
+
+    assert len(list(NotesLoader(corpus_dir).iter_documents())) == 1
+
+
+def test_corpus_loaders_skip_pre_migration_documents(tmp_path):
+    """A document with no `id` predates the corpus layout. Skipping it lets a
+    half-migrated corpus build what it can instead of aborting the whole run.
+    """
+    corpus_dir = tmp_path / "notes"
+    corpus_dir.mkdir()
+    (corpus_dir / "Legacy Note.md").write_text(
+        "---\ntitle: Legacy\n---\n\nBody.\n", encoding="utf-8"
+    )
+    write_corpus_document(
+        corpus_dir, document_id="note0000001", title="Migrated", body="Body.",
+        managed_by="user",
+    )
+
+    documents = list(NotesLoader(corpus_dir).iter_documents())
+
+    assert [document.id for document in documents] == ["note0000001"]
+
+
+def test_notes_loader_describes_sources(tmp_path):
+    corpus_dir = tmp_path / "notes"
     corpus_dir.mkdir()
 
-    assert "bibtex" not in LiteratureLoader(corpus_dir).describe_sources()
+    assert NotesLoader(corpus_dir).describe_sources() == {"corpus_dir": "notes"}
+
+
+# ---------------------------------------------------------------------------
+# Read handles: alias resolution lives in the engine, so CLI and MCP share it
+# ---------------------------------------------------------------------------
+
+
+def _handle_with(chunks):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(chunks=chunks)
+
+
+def _alias_chunk(document_id: str, metadata: dict, chunk_index: int = 0):
+    return Chunk(
+        id=f"{document_id}::{chunk_index}",
+        collection="literature",
+        document_id=document_id,
+        chunk_index=chunk_index,
+        text="Body.",
+        source_path="/corpus/Doc.md",
+        char_start=0,
+        char_end=5,
+        metadata=metadata,
+    )
+
+
+def test_alias_map_resolves_citekey_arxiv_doi_and_title():
+    from boepie.rag.engine import build_alias_map
+
+    handle = _handle_with([
+        _alias_chunk("aB3dE9fGhI", {
+            "title": "CubiCal",
+            "bib": {"citekey": "kenyon2018", "arxiv_id": "1805.03410", "doi": "10.1/x"},
+        })
+    ])
+
+    aliases = build_alias_map(handle)
+
+    for key in ("kenyon2018", "1805.03410", "10.1/x", "CubiCal", "cubical"):
+        assert aliases[key] == "aB3dE9fGhI"
+
+
+def test_read_span_resolves_an_alias_case_insensitively():
+    """Case-insensitivity comes from lowercasing the lookup, not from storing
+    an uppercase variant of every key."""
+    from boepie.rag.engine import read_span
+
+    handle = _handle_with([
+        _alias_chunk("aB3dE9fGhI", {"title": "CubiCal", "bib": {"citekey": "kenyon2018"}})
+    ])
+
+    assert read_span(handle, "KENYON2018").document_id == "aB3dE9fGhI"
+
+
+def test_alias_map_resolves_a_docs_project_page_pair():
+    from boepie.rag.engine import build_alias_map
+
+    handle = _handle_with([
+        _alias_chunk("doc0000001", {"title": "Params", "docs": {"project": "stimela", "page": "params"}})
+    ])
+
+    assert build_alias_map(handle)["stimela/params"] == "doc0000001"
+
+
+def test_alias_map_drops_a_key_shared_by_two_documents():
+    """Two papers titled "Introduction" must not make one of them silently
+    win: an ambiguous alias is no alias."""
+    from boepie.rag.engine import build_alias_map
+
+    handle = _handle_with([
+        _alias_chunk("aaaaaaaaa1", {"title": "Introduction"}),
+        _alias_chunk("aaaaaaaaa2", {"title": "Introduction"}),
+    ])
+
+    assert "Introduction" not in build_alias_map(handle)
+
+
+def test_read_span_prefers_a_literal_id_over_an_alias():
+    """A real id must never be shadowed by another document's title."""
+    from boepie.rag.engine import build_alias_map, read_span
+
+    handle = _handle_with([
+        _alias_chunk("realid0001", {"title": "Decoy"}),
+        _alias_chunk("aaaaaaaaa2", {"title": "realid0001"}),
+    ])
+    assert build_alias_map(handle)["realid0001"] == "aaaaaaaaa2"
+
+    span = read_span(handle, "realid0001")
+
+    assert span.document_id == "realid0001"
+
+
+# ---------------------------------------------------------------------------
+# Group scoping: the `group` metadata and the `glob` filter over it
+# ---------------------------------------------------------------------------
+
+
+def test_corpus_loader_records_the_group_a_document_is_filed_under(tmp_path):
+    """Recorded explicitly rather than re-derived from source_path, which is
+    absolute and machine-specific - an index built on one machine has to stay
+    group-filterable on another."""
+    write_corpus_document(
+        tmp_path, document_id="aaaaaaaaaa", title="Top Level", body="Body.\n"
+    )
+    write_corpus_document(
+        tmp_path, document_id="bbbbbbbbbb", title="Nested", body="Body.\n",
+        group="calibration/gains",
+    )
+
+    groups = {
+        document.id: document.metadata["group"]
+        for document in NotesLoader(tmp_path).iter_documents()
+    }
+    assert groups == {"aaaaaaaaaa": "", "bbbbbbbbbb": "calibration/gains"}
+
+
+def test_glob_filter_selects_a_group_and_its_descendants():
+    in_gains = _chunk({"group": "calibration/gains"})
+    at_root = _chunk({"group": ""})
+
+    # A group selects what is filed under it.
+    assert Filter(field="group", op="glob", value="calibration").predicate()(in_gains)
+    assert Filter(field="group", op="glob", value="calibration/*").predicate()(in_gains)
+    # `**/` matches at any depth, including none.
+    assert Filter(field="group", op="glob", value="**/gains").predicate()(in_gains)
+    assert not Filter(field="group", op="glob", value="wsclean").predicate()(in_gains)
+    assert not Filter(field="group", op="glob", value="calibration").predicate()(at_root)
+
+
+def test_glob_filter_stops_a_single_star_at_a_separator():
+    """`fnmatch`'s `*` crosses `/`, which would make `*` and `**` synonyms and
+    leave no way to pin a pattern to one level."""
+    from boepie.rag.models import _globstar_regex
+
+    assert _globstar_regex("*").fullmatch("wsclean")
+    assert not _globstar_regex("*").fullmatch("wsclean/deep")
+    assert _globstar_regex("**").fullmatch("wsclean/deep")
+
+
+def test_filter_on_a_missing_field_excludes_rather_than_raises():
+    """The silent-failure mode that made the CLI's flat `year`/`project`
+    filters return zero hits against nested frontmatter."""
+    assert not Filter(field="bib.year", op="gte", value=2000).predicate()(
+        _chunk({"year": "2014"})
+    )
+    assert Filter(field="bib.year", op="gte", value=2000).predicate()(
+        _chunk({"bib": {"year": "2014"}})
+    )

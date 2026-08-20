@@ -1,6 +1,6 @@
 """Shared rendering and error handling for the three retrieval tool pairs.
 
-``search_literature`` / ``search_docs`` / ``search_knowledge`` all emit output
+``search_literature`` / ``search_docs`` / ``search_context`` all emit output
 family F2 (ranked hits) and ``read_literature`` / ``read_docs`` both emit F4
 (a document span), per ``design/interface-spec.md``. Everything those tools have
 in common lives here; what differs per collection (which metadata field
@@ -22,7 +22,7 @@ from typing import Callable, Literal, Sequence
 from openai import APIConnectionError
 from pydantic import BaseModel, Field
 
-from boepie.config import DOCS_DIR, LITERATURE_DIR
+from boepie.config import DOCS_DIR, LITERATURE_DIR, NOTES_DIR
 from boepie.rag import ModelBinding, get_or_load, read_span, search
 from boepie.rag.engine import DocumentSpan, Mode
 from boepie.rag.models import Chunk, Filter, SearchResult
@@ -74,6 +74,19 @@ def _title_or_id(chunk: Chunk) -> str:
     return chunk.metadata.get("title") or chunk.document_id
 
 
+def _docs_title(chunk: Chunk) -> str:
+    """A docs hit's title, qualified by project.
+
+    Page titles repeat heavily across projects ("Installation", "Overview"),
+    so the project is what makes a hit identifiable at a glance - it is the
+    part `search_docs`'s own `project` filter is phrased in.
+    """
+    docs_block = chunk.metadata.get("docs")
+    project = docs_block.get("project") if isinstance(docs_block, dict) else None
+    title = _title_or_id(chunk)
+    return f"{project}: {title}" if project else title
+
+
 @dataclass(frozen=True)
 class CollectionView:
     """How one collection presents its hits and spans."""
@@ -103,18 +116,28 @@ VIEWS: dict[str, CollectionView] = {
         read_handles=True,
         missing_index_fix="'boepie sync' or 'boepie index build --collection docs'",
         search_tool="search_docs",
-        # Docs ids are already `project/page`; no richer title exists.
-        title_of=lambda chunk: chunk.document_id,
+        # A docs page carries a real `title` in its frontmatter and a
+        # surrogate id that means nothing to a reader, so it titles hits the
+        # same way every other collection does.
+        title_of=_docs_title,
     ),
-    "knowledge": CollectionView(
-        collection="knowledge",
+    "context": CollectionView(
+        collection="context",
         # Kept in the rendered path (unlike the corpus roots) because these are
         # the paths the agent feeds to its own file tools.
         source_root=".boepie",
         keep_source_root=True,
-        read_handles=False,  # no read_knowledge tool: the source line is the handle
-        missing_index_fix="'boepie knowledge apply'",
-        search_tool="search_knowledge",
+        read_handles=False,  # no read_context tool: the source line is the handle
+        missing_index_fix="'boepie context apply'",
+        search_tool="search_context",
+    ),
+    "notes": CollectionView(
+        collection="notes",
+        source_root=NOTES_DIR.name,
+        keep_source_root=False,
+        read_handles=True,
+        missing_index_fix="'boepie index build --collection notes'",
+        search_tool="search_notes",
     ),
 }
 
@@ -176,7 +199,7 @@ def _score_detail(result: SearchResult) -> str:
     """Raw per-leg scores for CLI/debug rendering, only the legs that ran.
 
     Compact and clearly labelled, e.g. ``bm25=3.42 cos=0.71 rrf=0.033``
-    (knowledge, BM25-only, shows just ``bm25=3.42``). Never shown to the
+    (context, BM25-only, shows just ``bm25=3.42``). Never shown to the
     agent - see ``format_hits``'s ``score_detail`` parameter.
     """
     parts = []
@@ -215,26 +238,92 @@ def format_hits(
     """
     lines = [f'{len(results)} hits for "{question}" in {collection}']
     for rank, result in enumerate(results, 1):
-        chunk = result.chunk
-        title = title_of(chunk)
-        # A page whose only heading restates its title (common in the knowledge
-        # bundle) would otherwise print the same string twice per hit.
-        section = f" #{chunk.section}" if chunk.section and chunk.section != title else ""
-        lines.append("")
-        suffix = f"  {_score_detail(result)}" if score_detail else ""
-        lines.append(f"[{rank}] {title}{section}{suffix}")
-        if read_handles:
-            lines.append(
-                f"{_INDENT}read: document_id={chunk.document_id} "
-                f"chunk_index={chunk.chunk_index}"
+        lines.extend(
+            _hit_block(
+                rank,
+                result,
+                title=title_of(result.chunk),
+                source_root=source_root,
+                keep_source_root=keep_source_root,
+                read_handles=read_handles,
+                snippet=snippet,
+                score_detail=score_detail,
             )
-        source = relative_source(chunk.source_path, source_root, keep_root=keep_source_root)
-        lines.append(
-            f"{_INDENT}source: {source} (chars {chunk.char_start}-{chunk.char_end})"
         )
-        body = snippet_text(chunk.text, snippet)
-        if body:
-            lines.append(_indent(body))
+    return "\n".join(lines)
+
+
+def _hit_block(
+    rank: int,
+    result: SearchResult,
+    *,
+    title: str,
+    source_root: str,
+    keep_source_root: bool,
+    read_handles: bool,
+    snippet: Snippet,
+    score_detail: bool,
+    label: str | None = None,
+) -> list[str]:
+    """One hit's lines, shared by the single- and multi-collection renderings
+    so the two cannot drift. ``label`` names the hit's collection, and is set
+    only when the surrounding list mixes several.
+    """
+    chunk = result.chunk
+    # A page whose only heading restates its title (common in the context
+    # bundle) would otherwise print the same string twice per hit.
+    section = f" #{chunk.section}" if chunk.section and chunk.section != title else ""
+    suffix = f"  {_score_detail(result)}" if score_detail else ""
+    prefix = f"{label}  " if label else ""
+    lines = ["", f"[{rank}] {prefix}{title}{section}{suffix}"]
+    if read_handles:
+        lines.append(
+            f"{_INDENT}read: document_id={chunk.document_id} "
+            f"chunk_index={chunk.chunk_index}"
+        )
+    source = relative_source(chunk.source_path, source_root, keep_root=keep_source_root)
+    lines.append(
+        f"{_INDENT}source: {source} (chars {chunk.char_start}-{chunk.char_end})"
+    )
+    body = snippet_text(chunk.text, snippet)
+    if body:
+        lines.append(_indent(body))
+    return lines
+
+
+def format_merged_hits(
+    question: str,
+    ranked: Sequence[tuple[str, SearchResult]],
+    *,
+    collections: Sequence[str],
+    snippet: Snippet,
+    score_detail: bool = False,
+) -> str:
+    """Render hits drawn from several collections as one ranked list.
+
+    ``ranked`` is already in final order, each entry paired with the
+    collection it came from; every hit is labelled, because "which corpus is
+    this from" is the first thing a mixed list has to answer. Ordering across
+    collections is by RRF score, which is derived from ranks rather than from
+    any one backend's raw scale - the only cross-collection comparison
+    available that is not meaningless.
+    """
+    lines = [f'{len(ranked)} hits for "{question}" in {",".join(collections)}']
+    for rank, (collection, result) in enumerate(ranked, 1):
+        view = VIEWS[collection]
+        lines.extend(
+            _hit_block(
+                rank,
+                result,
+                title=view.title_of(result.chunk),
+                source_root=view.source_root,
+                keep_source_root=view.keep_source_root,
+                read_handles=view.read_handles,
+                snippet=snippet,
+                score_detail=score_detail,
+                label=collection,
+            )
+        )
     return "\n".join(lines)
 
 
@@ -397,6 +486,9 @@ async def read_spans(
     blocks: list[str] = []
     for request in requests:
         try:
+            # `read_span` resolves a citekey/arXiv id/title alias itself when
+            # the literal id misses, so both this and the CLI's `read` get
+            # that behaviour from one place.
             span = read_span(
                 handle,
                 request.document_id,

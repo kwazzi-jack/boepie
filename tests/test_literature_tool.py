@@ -36,21 +36,28 @@ _BODY = (
 _DOCS = {"kalman2014": f"# Kalman calibration\n\n{_BODY}"}
 _FAKE_BINDING = ModelBinding(kind="ollama", model="fake:bow", dim=len(_VOCAB))
 
-# Mirrors the real corpus layout ({corpus_root}/{citekey}/{citekey}.md) so the
-# source-path relativisation in _retrieval has its anchor to cut on.
-_CORPUS_ROOT = "/home/someone/PhD/boepie/stimela-corpus"
+# Mirrors the real corpus layout (full-title filename under the corpus root,
+# surrogate id, nested `bib` block) so the source-path relativisation in
+# _retrieval has its anchor to cut on and the alias map has a citekey to find.
+_CORPUS_ROOT = "/home/someone/.local/share/boepie/literature-corpus"
+_DOCUMENT_ID = "aB3dE9fGhI"
+_CITEKEY = "kalman2014"
 
 
 class _FakeLoader:
     name = "literature"
 
     def iter_documents(self):
-        for doc_id, text in _DOCS.items():
+        for citekey, text in _DOCS.items():
             yield Document(
-                id=doc_id,
+                id=_DOCUMENT_ID,
                 text=text,
-                source_path=f"{_CORPUS_ROOT}/{doc_id}/{doc_id}.md",
-                metadata={"citekey": doc_id, "title": "Fake Kalman Paper", "year": "2014"},
+                source_path=f"{_CORPUS_ROOT}/Fake Kalman Paper.md",
+                metadata={
+                    "title": "Fake Kalman Paper",
+                    "managed_by": "boepie",
+                    "bib": {"citekey": citekey, "year": "2014"},
+                },
             )
 
 
@@ -139,14 +146,14 @@ async def test_search_literature_surfaces_copy_pasteable_read_handles(
     literature_index, boepie_client: Client[FastMCPTransport]
 ):
     text = await _search(boepie_client)
-    assert "    read: document_id=kalman2014 chunk_index=" in text
+    assert f"    read: document_id={_DOCUMENT_ID} chunk_index=" in text
 
 
 async def test_search_literature_source_path_is_relative(
     literature_index, boepie_client: Client[FastMCPTransport]
 ):
     text = await _search(boepie_client)
-    assert "source: kalman2014/kalman2014.md (chars " in text
+    assert "source: Fake Kalman Paper.md (chars " in text
     assert _CORPUS_ROOT not in text  # no absolute path, no leaked home directory
 
 
@@ -191,7 +198,7 @@ async def test_search_literature_snippet_none_drops_bodies_and_shrinks_payload(
     assert "Nonlinear Kalman filters" not in none_payload
     assert len(none_payload) < len(short_payload)
     # Handles survive: a caller can still escalate to read_literature.
-    assert "read: document_id=kalman2014" in none_payload
+    assert f"read: document_id={_DOCUMENT_ID}" in none_payload
 
 
 async def test_search_literature_snippet_full_returns_whole_chunk(
@@ -221,7 +228,7 @@ async def test_search_literature_falls_back_to_bm25_when_backend_unreachable(
     assert note.startswith("Note:") and "unreachable" in note
     assert "_" not in note  # the old note was italicised; italics are banned
     assert rest.startswith("1 hits for") or rest.startswith("0 hits for")
-    assert "kalman2014" in text
+    assert _DOCUMENT_ID in text
 
 
 async def test_search_literature_dense_mode_surfaces_backend_error(
@@ -266,12 +273,14 @@ async def test_read_literature_emits_f4_provenance_header(
 ):
     text = _text(
         await boepie_client.call_tool(
-            "read_literature", {"input": {"requests": [{"document_id": "kalman2014"}]}}
+            "read_literature", {"input": {"requests": [{"document_id": _DOCUMENT_ID}]}}
         )
     )
     lines = text.splitlines()
-    assert re.match(r"^document_id=kalman2014 chunks=\d+-\d+ chars=\d+-\d+$", lines[0])
-    assert lines[1] == "source: kalman2014/kalman2014.md"
+    assert re.match(
+        rf"^document_id={_DOCUMENT_ID} chunks=\d+-\d+ chars=\d+-\d+$", lines[0]
+    )
+    assert lines[1] == "source: Fake Kalman Paper.md"
     assert lines[2] == "sections: Kalman calibration"
     assert lines[3] == ""
     assert "Nonlinear Kalman filters calibrate" in text
@@ -287,14 +296,14 @@ async def test_read_literature_batches_without_a_horizontal_rule(
             {
                 "input": {
                     "requests": [
-                        {"document_id": "kalman2014", "chunk_index": 0, "after": 0},
-                        {"document_id": "kalman2014", "chunk_index": 0, "before": 0},
+                        {"document_id": _DOCUMENT_ID, "chunk_index": 0, "after": 0},
+                        {"document_id": _DOCUMENT_ID, "chunk_index": 0, "before": 0},
                     ]
                 }
             },
         )
     )
-    assert text.count("document_id=kalman2014") == 2
+    assert text.count(f"document_id={_DOCUMENT_ID}") == 2
     assert "---" not in text
 
 
@@ -308,4 +317,51 @@ async def test_read_literature_reports_unknown_document_on_one_line(
     )
     assert text.startswith("Error:")
     assert len(text.splitlines()) == 1
+    assert "search_literature" in text
+
+
+# ---------------------------------------------------------------------------
+# Read handles: surrogate ids, with human-writable aliases
+# ---------------------------------------------------------------------------
+
+
+async def test_read_literature_resolves_a_citekey_to_its_surrogate_id(
+    boepie_client, literature_index
+):
+    """The context bundle's own paper stubs cite a citekey as the read
+    handle, so a citekey has to keep working even though documents are
+    addressed by an opaque id."""
+    text = _text(
+        await boepie_client.call_tool(
+            "read_literature", {"input": {"requests": [{"document_id": _CITEKEY}]}}
+        )
+    )
+
+    assert text.startswith(f"document_id={_DOCUMENT_ID}")
+
+
+async def test_read_literature_resolves_a_citekey_case_insensitively(
+    boepie_client, literature_index
+):
+    text = _text(
+        await boepie_client.call_tool(
+            "read_literature",
+            {"input": {"requests": [{"document_id": _CITEKEY.upper()}]}},
+        )
+    )
+
+    assert text.startswith(f"document_id={_DOCUMENT_ID}")
+
+
+async def test_read_literature_still_rejects_an_invented_handle(
+    boepie_client, literature_index
+):
+    text = _text(
+        await boepie_client.call_tool(
+            "read_literature",
+            {"input": {"requests": [{"document_id": "totally-made-up"}]}},
+        )
+    )
+
+    assert text.startswith("Error:")
     assert "search_literature" in text

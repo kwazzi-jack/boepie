@@ -146,17 +146,17 @@ def test_index_group_help(runner: CliRunner) -> None:
     assert "list" in result.output
 
 
-def test_knowledge_group_has_fetch(runner: CliRunner) -> None:
-    """The knowledge group should have a fetch command."""
-    result = runner.invoke(cli.cli, ["knowledge", "--help"])
+def test_context_group_has_fetch(runner: CliRunner) -> None:
+    """The context group should have a fetch command."""
+    result = runner.invoke(cli.cli, ["context", "--help"])
 
     assert result.exit_code == 0
     assert "fetch" in result.output
 
 
-def test_knowledge_group_has_apply_not_update(runner: CliRunner) -> None:
-    """The knowledge group should have apply, not update."""
-    result = runner.invoke(cli.cli, ["knowledge", "--help"])
+def test_context_group_has_apply_not_update(runner: CliRunner) -> None:
+    """The context group should have apply, not update."""
+    result = runner.invoke(cli.cli, ["context", "--help"])
 
     assert result.exit_code == 0
     assert "apply" in result.output
@@ -175,6 +175,6 @@ def test_top_level_no_index_command(runner: CliRunner) -> None:
     # The old 'index' command is now a group, so this checks it's not there as a standalone.
     result = runner.invoke(cli.cli, ["--help"])
 
-    # Should have 'index' group and 'knowledge' group
+    # Should have 'index' and 'context' groups (plus the shrunk 'knowledge' group).
     assert "index" in result.output
-    assert "knowledge" in result.output
+    assert "context" in result.output

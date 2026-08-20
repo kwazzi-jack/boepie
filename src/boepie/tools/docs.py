@@ -8,8 +8,11 @@ literature tools, sharing the F2/F4 rendering in ``boepie.tools._retrieval``.
 
 from __future__ import annotations
 
+from typing import cast
+
 from pydantic import BaseModel, Field
 
+from boepie.config import DEFAULT_MODE, DEFAULT_SNIPPET, DEFAULT_TOP_K
 from boepie.rag.engine import Mode
 from boepie.rag.models import Filter
 from boepie.tools._retrieval import (
@@ -33,9 +36,9 @@ class SearchDocsInput(BaseModel):
     question: str = Field(
         description="Natural-language query, e.g. 'how do I write a stimela recipe?'."
     )
-    top_k: int = Field(default=5, ge=1, le=20, description=TOP_K_DESCRIPTION)
-    mode: Mode = Field(default="hybrid", description=MODE_DESCRIPTION)
-    snippet: Snippet = Field(default="short", description=SNIPPET_DESCRIPTION)
+    top_k: int = Field(default=DEFAULT_TOP_K, ge=1, le=20, description=TOP_K_DESCRIPTION)
+    mode: Mode = Field(default=cast(Mode, DEFAULT_MODE), description=MODE_DESCRIPTION)
+    snippet: Snippet = Field(default=cast(Snippet, DEFAULT_SNIPPET), description=SNIPPET_DESCRIPTION)
     project: str | None = Field(
         default=None,
         description="Restrict to one project's documentation, e.g. 'stimela', 'quartical'.",
@@ -56,7 +59,13 @@ async def search_docs(input: SearchDocsInput) -> str:
     """
     filters: list[Filter] = []
     if input.project is not None:
-        filters.append(Filter(field="project", op="eq", value=input.project))
+        # Filters on `group`, not `docs.project`: a docs page's project *is*
+        # the group directory it is filed under (both `corpus add docs` and
+        # `corpus fetch` put pages under `{project}/`, always one level), so
+        # keeping a second `docs.project` predicate here would be two
+        # mechanisms for one concept - and would disagree with the CLI's
+        # `--project`, which is an alias for `--group`.
+        filters.append(Filter(field="group", op="glob", value=input.project))
 
     outcome = await search_with_lexical_fallback(
         input.question,

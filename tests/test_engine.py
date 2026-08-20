@@ -359,7 +359,7 @@ class MutableLoader:
 async def test_rebuilding_evicts_the_cached_handle(tmp_path):
     """A rebuild in the same process must be visible to the next search.
 
-    `knowledge apply` rebuilds and `search_knowledge` runs in the same
+    `context apply` rebuilds and `search_context` runs in the same
     long-lived server process, so a cached pre-rebuild handle would keep
     serving deleted content indefinitely.
     """
@@ -388,8 +388,8 @@ async def test_build_hint_names_a_real_command_per_collection(tmp_path):
         await engine.load_for_query(tmp_path, "literature")
     assert "boepie index fetch --collection literature" in str(literature_error.value)
 
-    with pytest.raises(FileNotFoundError) as knowledge_error:
-        await engine.load_for_query(tmp_path, "knowledge")
-    message = str(knowledge_error.value)
-    assert "boepie knowledge apply" in message
+    with pytest.raises(FileNotFoundError) as context_error:
+        await engine.load_for_query(tmp_path, "context")
+    message = str(context_error.value)
+    assert "boepie context apply" in message
     assert "boepie index" not in message

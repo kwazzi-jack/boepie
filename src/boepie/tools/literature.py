@@ -8,8 +8,11 @@ shared F2/F4 rendering lives in ``boepie.tools._retrieval``.
 
 from __future__ import annotations
 
+from typing import cast
+
 from pydantic import BaseModel, Field
 
+from boepie.config import DEFAULT_MODE, DEFAULT_SNIPPET, DEFAULT_TOP_K
 from boepie.rag.engine import Mode
 from boepie.rag.models import Filter
 from boepie.tools._retrieval import (
@@ -33,9 +36,9 @@ class SearchLiteratureInput(BaseModel):
     question: str = Field(
         description="Natural-language query, e.g. 'how does wsclean handle multiscale cleaning?'."
     )
-    top_k: int = Field(default=5, ge=1, le=20, description=TOP_K_DESCRIPTION)
-    mode: Mode = Field(default="hybrid", description=MODE_DESCRIPTION)
-    snippet: Snippet = Field(default="short", description=SNIPPET_DESCRIPTION)
+    top_k: int = Field(default=DEFAULT_TOP_K, ge=1, le=20, description=TOP_K_DESCRIPTION)
+    mode: Mode = Field(default=cast(Mode, DEFAULT_MODE), description=MODE_DESCRIPTION)
+    snippet: Snippet = Field(default=cast(Snippet, DEFAULT_SNIPPET), description=SNIPPET_DESCRIPTION)
     year_min: int | None = Field(
         default=None, description="Only consider papers published in this year or later."
     )
@@ -58,9 +61,9 @@ async def search_literature(input: SearchLiteratureInput) -> str:
     """
     filters: list[Filter] = []
     if input.year_min is not None:
-        filters.append(Filter(field="year", op="gte", value=input.year_min))
+        filters.append(Filter(field="bib.year", op="gte", value=input.year_min))
     if input.year_max is not None:
-        filters.append(Filter(field="year", op="lte", value=input.year_max))
+        filters.append(Filter(field="bib.year", op="lte", value=input.year_max))
 
     outcome = await search_with_lexical_fallback(
         input.question,

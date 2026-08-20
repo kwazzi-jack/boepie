@@ -11,7 +11,7 @@ supplies the lexical leg, and the two are fused with reciprocal rank fusion
 
 A collection can also be built and queried with no embedding backend at all
 (``embedding=None``): a lexical-only index, BM25 alone, no Ollama/OpenAI call
-and no ``embeddings.npy`` on disk. This is what backs ``search_knowledge`` over
+and no ``embeddings.npy`` on disk. This is what backs ``search_context`` over
 the small curated bundle, where BM25 is sufficient and a live backend would
 just be dead weight.
 
@@ -126,6 +126,23 @@ def _collect_sources(loader: Loader, document_ids: list[str]) -> dict[str, Any]:
     return sources
 
 
+class EmptyCollectionError(ValueError):
+    """`build` was handed a loader that yielded no indexable chunks.
+
+    A ValueError subclass so existing `except ValueError` handlers (the CLI's
+    `_run`) keep reporting it as a clean message, while a caller building
+    several collections at once can catch just this one and skip on.
+    """
+
+    def __init__(self, collection: str) -> None:
+        self.collection = collection
+        super().__init__(
+            f"no indexable documents found for '{collection}' - the corpus "
+            f"directory is empty, or its documents predate the current "
+            f"frontmatter schema and carry no 'id'."
+        )
+
+
 async def build(
     loader: Loader,
     *,
@@ -159,6 +176,15 @@ async def build(
             chunk.id = f"{document.id}::{len(chunks)}"
             chunk.chunk_index = len(chunks)
             chunks.append(chunk)
+
+    # Guarded before anything is written or embedded: bm25s answers an empty
+    # corpus with `max() iterable argument is empty` from deep inside its own
+    # vocabulary build, which says nothing about the collection being empty.
+    # An unreadable corpus reaches here the same way an absent one does - a
+    # loader skips a document whose frontmatter it cannot parse - so the
+    # message names the directory rather than asserting the files are missing.
+    if not chunks:
+        raise EmptyCollectionError(loader.name)
 
     resolved_id = index_id or (
         index_id_for(embedding) if embedding is not None else _LEXICAL_ONLY_INDEX_ID
@@ -228,12 +254,12 @@ class QueryHandle:
 def _build_hint(collection: str) -> str:
     """The command that actually produces `collection`'s index.
 
-    The knowledge collection is the odd one out: its index is derived state
+    The context collection is the odd one out: its index is derived state
     inside a project's own `.boepie/` bundle, rebuilt by the bundle commands,
     never fetched from a release or built with `index build`.
     """
-    if collection == "knowledge":
-        return "Run `boepie knowledge apply` (or `init` if there is no bundle yet)."
+    if collection == "context":
+        return "Run `boepie context apply` (or `init` if there is no bundle yet)."
     return (
         f"Run `boepie index fetch --collection {collection}` (end user) or "
         f"`boepie index build --collection {collection}` (dev) first."
@@ -410,6 +436,46 @@ def _stitch(chunks: list[Chunk]) -> str:
     return "".join(parts)
 
 
+def build_alias_map(handle: QueryHandle) -> dict[str, str]:
+    """Human-writable keys -> surrogate document id, for one loaded index.
+
+    A corpus document is addressed by an opaque id, but the things people and
+    curated notes actually write down are citekeys, arXiv ids, project/page
+    pairs and titles - the context bundle's own paper stubs cite a citekey as
+    the read handle. Resolving those keeps such references working without
+    giving up the id's stability across renames.
+
+    Built from chunk metadata already in memory, so it costs one pass and is
+    only consulted after a literal id lookup has missed. Lowercased variants
+    are included so casing need not be remembered exactly; a key that would
+    map to two different documents is dropped rather than resolved
+    arbitrarily.
+    """
+    candidates: dict[str, set[str]] = {}
+
+    def record(key: object, document_id: str) -> None:
+        if not isinstance(key, str) or not key:
+            return
+        for variant in (key, key.lower()):
+            candidates.setdefault(variant, set()).add(document_id)
+
+    for chunk in handle.chunks:
+        metadata = chunk.metadata
+        record(metadata.get("title"), chunk.document_id)
+        bib = metadata.get("bib")
+        if isinstance(bib, dict):
+            record(bib.get("citekey"), chunk.document_id)
+            record(bib.get("arxiv_id"), chunk.document_id)
+            record(bib.get("doi"), chunk.document_id)
+        docs = metadata.get("docs")
+        if isinstance(docs, dict):
+            project, page = docs.get("project"), docs.get("page")
+            if project and page:
+                record(f"{project}/{page}", chunk.document_id)
+
+    return {key: next(iter(ids)) for key, ids in candidates.items() if len(ids) == 1}
+
+
 def read_span(
     handle: QueryHandle,
     document_id: str,
@@ -423,11 +489,24 @@ def read_span(
     ``chunk_index`` anchors the window (typically a chunk_index from a search
     hit); ``before``/``after`` extend it by that many neighbouring chunks within
     the same document. Pass ``chunk_index=None`` to read the whole document.
+
+    ``document_id`` may also be a citekey, arXiv id, DOI, ``project/page``
+    pair, or exact title; see ``build_alias_map``. Resolution happens only
+    after a literal id lookup misses, so a real id is never shadowed.
     """
     doc_chunks = sorted(
         (c for c in handle.chunks if c.document_id == document_id),
         key=lambda c: (c.char_start, c.chunk_index),
     )
+    if not doc_chunks:
+        aliases = build_alias_map(handle)
+        resolved = aliases.get(document_id) or aliases.get(document_id.lower())
+        if resolved is not None:
+            document_id = resolved
+            doc_chunks = sorted(
+                (c for c in handle.chunks if c.document_id == document_id),
+                key=lambda c: (c.char_start, c.chunk_index),
+            )
     if not doc_chunks:
         raise KeyError(f"No document '{document_id}' in this collection.")
 
