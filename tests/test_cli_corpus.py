@@ -664,8 +664,9 @@ def test_corpus_fetch_literature_reports_unavailable_papers(
     result = runner.invoke(cli.cli, ["corpus", "fetch", "--collection", "literature"])
 
     assert result.exit_code == 0, result.output
-    assert "Not available in HTML" in result.output
+    assert "no HTML" in result.output
     assert "perkins2025" in result.output
+    assert "boepie corpus add literature <file.pdf>" in _plain(result.output)
 
 
 def test_corpus_fetch_literature_rejects_a_bad_force_target(
@@ -789,7 +790,7 @@ def test_corpus_status_literature_reports_fetched_and_not_fetched(
 
     assert result.exit_code == 0, result.output
     output = _plain(result.output)
-    assert "1 document(s): 1 boepie-managed, 0 yours" in output
+    assert "1 total, 1 boepie-managed, 0 yours" in output
     assert "1 paper(s) in the manifest not fetched yet" in output
     assert "notyet2020" in output
 
@@ -824,8 +825,8 @@ def test_corpus_status_docs_reports_page_counts_per_project(
 
     assert result.exit_code == 0, result.output
     output = _plain(result.output)
-    assert "3 document(s): 3 boepie-managed, 0 yours" in output
-    assert "In step with the packaged manifest." in output
+    assert "3 total, 3 boepie-managed, 0 yours" in output
+    assert "in step with the packaged manifest" in output
 
 
 def test_corpus_status_notes_reports_a_count(
@@ -843,7 +844,7 @@ def test_corpus_status_notes_reports_a_count(
 
     assert result.exit_code == 0, result.output
     # Every collection reports the same shape, notes included.
-    assert "2 document(s): 0 boepie-managed, 2 yours" in _plain(result.output)
+    assert "2 total, 0 boepie-managed, 2 yours" in _plain(result.output)
 
 
 # ---------------------------------------------------------------------------

@@ -38,7 +38,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from tomllib import TOMLDecodeError
-from typing import Any, Literal
+from typing import Any, Literal, get_origin
 
 import tomlkit
 from platformdirs import user_config_dir
@@ -222,6 +222,22 @@ class IngestionSettings(BaseModel):
     )
 
 
+class PipelineSettings(BaseModel):
+    """Which stimela libraries the cab and recipe tools read."""
+
+    sources: list[str] = Field(
+        default=["cultcargo::"],
+        description=(
+            "stimela sources to load, in stimela's own 'module::path' or "
+            "'(module)/path' spelling - 'cultcargo::' means every YAML that "
+            "package's MANIFEST.stimela names. Plain file and directory "
+            "paths work too. Loaded once per process and cached, so this is "
+            "for installed libraries; a recipe file you are working on goes "
+            "to a recipe tool's recipe_file argument instead."
+        ),
+    )
+
+
 class SyncSettings(BaseModel):
     """Staleness nudges. boepie never self-updates or schedules OS-level jobs."""
 
@@ -248,6 +264,26 @@ class InstructionsSettings(BaseModel):
     )
 
 
+def is_list_setting(key: str) -> bool:
+    """Whether a dotted key holds a list rather than a scalar.
+
+    List-valued keys are a TOML array in the file, but a single string in an
+    environment variable or a `config set` argument, so both of those layers
+    have to split before pydantic sees the value.
+    """
+    return get_origin(field_for(key).annotation) is list
+
+
+def _split_list_value(raw: str) -> list[str]:
+    """Split a comma-separated setting into its items, dropping empties.
+
+    Comma rather than another separator to match the `--collection`
+    convention the CLI already uses, and because a whitespace split would
+    mangle the one thing these lists actually hold - paths.
+    """
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
 class ExactNameEnvSource(PydanticBaseSettingsSource):
     """Reads one exact `BOEPIE_<SECTION>_<KEY>` variable per known field.
 
@@ -263,9 +299,12 @@ class ExactNameEnvSource(PydanticBaseSettingsSource):
     def __call__(self) -> dict[str, Any]:
         values: dict[str, Any] = {}
         for section, key in _iter_schema_keys(self.settings_cls):
-            raw = os.environ.get(env_var_for(f"{section}.{key}"))
-            if raw is not None:
-                values.setdefault(section, {})[key] = raw
+            dotted = f"{section}.{key}"
+            raw = os.environ.get(env_var_for(dotted))
+            if raw is None:
+                continue
+            parsed = _split_list_value(raw) if is_list_setting(dotted) else raw
+            values.setdefault(section, {})[key] = parsed
         return values
 
 
@@ -280,6 +319,7 @@ class BoepieSettings(BaseSettings):
     corpus: CorpusSettings = CorpusSettings()
     mineru: MineruSettings = MineruSettings()
     ingestion: IngestionSettings = IngestionSettings()
+    pipeline: PipelineSettings = PipelineSettings()
     sync: SyncSettings = SyncSettings()
     instructions: InstructionsSettings = InstructionsSettings()
 
@@ -427,7 +467,10 @@ def resolve_settings() -> list[ResolvedSetting]:
 # ---------------------------------------------------------------------------
 
 
-def parse_value(key: str, raw: str) -> bool | int | float | str:
+type SettingValue = bool | int | float | str | list[str]
+
+
+def parse_value(key: str, raw: str) -> SettingValue:
     """Validates a `config set` string against the key's declared type.
 
     Validation runs through the section's own model rather than the field's
@@ -436,24 +479,30 @@ def parse_value(key: str, raw: str) -> bool | int | float | str:
     user can still see what they typed, not be written to the file and
     rejected on the next import. Every field has a default, so validating
     the section with just this one key set is well defined.
+
+    A list-valued key is given as one comma-separated argument and split
+    before validation, since a shell argument cannot be a TOML array.
     """
     section, _, name = key.partition(".")
     section_model = BoepieSettings.model_fields[section].annotation
     if section_model is None or not issubclass(section_model, BaseModel):
         raise KeyError(key)
+    supplied = _split_list_value(raw) if is_list_setting(key) else raw
     try:
-        validated = section_model.model_validate({name: raw})
+        validated = section_model.model_validate({name: supplied})
     except ValidationError as error:
         detail = "; ".join(item["msg"] for item in error.errors())
         raise ConfigError(f"invalid value for {key}: {detail}") from error
 
     value = getattr(validated, name)
+    if isinstance(value, list):
+        return [str(item) for item in value]
     if not isinstance(value, bool | int | float | str):
         raise ConfigError(f"{key} does not hold a value TOML can store")
     return value
 
 
-def set_value(key: str, value: bool | int | float | str) -> None:
+def set_value(key: str, value: SettingValue) -> None:
     """Writes `value` at the dotted path `key`, creating the file and its
     parent table as needed. Round-tripped via tomlkit, so other keys and any
     comments already in the file survive untouched."""

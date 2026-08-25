@@ -1,7 +1,14 @@
 """MCP tools for querying stimela cab definitions and documentation.
 
-These tools let the AI discover what software is available through
-cult-cargo and inspect their parameters via ``stimela doc``.
+These read the same resolved config stimela itself uses, loaded from the
+libraries named by `pipeline.sources` (`cultcargo::` by default). Every
+schema here has been through `Cab.finalize`, so nested parameter groups
+appear flattened - `input_ms.path`, not an opaque `input_ms` mapping.
+
+Parameter volume is the thing to watch: cult-cargo's `wsclean` alone
+declares 171 inputs. Hence the `detail` ceiling (stimela's own
+`ParameterCategory`, defaulting to `optional` exactly as `stimela doc`
+does) and `get_cab_docs`'s `params` filter.
 """
 
 from __future__ import annotations
@@ -11,29 +18,57 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from boepie.pipeline.runner import CabParam, list_cabs_with_info, load_cab_schema
 from boepie.pipeline._table import write_csv
+from boepie.pipeline.runner import (
+    DEFAULT_DETAIL,
+    CabParam,
+    DetailLevel,
+    list_cabs_with_info,
+    load_cab_schema,
+)
+from boepie.pipeline.stimela_config import StimelaConfigError, describe_sources
 
-
-# Canonical field order for get_cab_params output.
+# Canonical field order for get_cab_params output. No "examples": scabha
+# parameters do not carry any, and the column was emitting a literal "null"
+# on every row.
 _AVAILABLE_FIELDS: list[str] = [
-    "dtype", "info", "required", "default", "choices", "writable", "examples",
+    "dtype",
+    "info",
+    "required",
+    "default",
+    "choices",
+    "writable",
+    "category",
 ]
+
+_DETAIL_HELP = (
+    "How much of the schema to include, as stimela's own parameter "
+    "categories: 'required' is required inputs only, 'optional' (the "
+    "default, and what `stimela doc` shows) adds everything settable, "
+    "'implicit' adds parameters the cab fills in itself, 'obscure' and "
+    "'hidden' add the rest."
+)
 
 
 def list_cabs(pattern: str | None = None) -> str:
     """List available cab (containerised application bundle) definitions.
 
-    Use this to discover what tools cult-cargo provides before building a
-    recipe. Narrow with an fnmatch ``pattern`` (e.g. ``casa.*``, ``*clean*``);
-    omit it to list everything.
+    Use this to discover what tools are available before building a recipe.
+    Narrow with an fnmatch ``pattern`` (e.g. ``casa.*``, ``*clean*``); omit
+    it to list everything.
 
     Returns a count line followed by a CSV table of ``cab``, ``description``.
     """
-    all_cabs = list_cabs_with_info()
+    try:
+        all_cabs = list_cabs_with_info()
+    except StimelaConfigError as error:
+        return f"Error: {error}"
     total = len(all_cabs)
     if not all_cabs:
-        return "Error: no cab definitions found. Run 'uv sync' to install project dependencies."
+        return (
+            f"Error: no cab definitions found in the configured stimela sources "
+            f"({describe_sources()}). Check 'boepie config get pipeline.sources'."
+        )
 
     if pattern:
         all_cabs = [row for row in all_cabs if fnmatch.fnmatch(row["cab"], pattern)]
@@ -52,37 +87,52 @@ class GetCabDocsInput(BaseModel):
         default=None,
         description="Restrict output to these parameter names. Omit for every parameter.",
     )
+    detail: DetailLevel = Field(default=DEFAULT_DETAIL, description=_DETAIL_HELP)
 
 
 def get_cab_docs(input: GetCabDocsInput) -> str:
     """Get full parameter documentation for a cab: descriptions, defaults, choices.
 
     Use this when learning a new tool. For quick name/type confirmation,
-    use ``get_cab_schema`` instead.
+    use ``get_cab_schema`` instead. Big cabs run to well over a hundred
+    parameters, so pass ``params`` when you already know what you are after.
 
     Returns a compact text report of the cab's inputs and outputs, including
     descriptions, defaults, and choices.
     """
     try:
-        schema = load_cab_schema(input.cab_name)
-    except ValueError as error:
+        schema = load_cab_schema(input.cab_name, detail=input.detail)
+    except (ValueError, StimelaConfigError) as error:
         return f"Error: {error}"
 
     if input.params is not None:
         params_set = set(input.params)
-        schema = schema.model_copy(update={
-            "inputs": {name: param for name, param in schema.inputs.items() if name in params_set},
-            "outputs": {name: param for name, param in schema.outputs.items() if name in params_set},
-        })
+        schema = schema.model_copy(
+            update={
+                "inputs": {
+                    name: param
+                    for name, param in schema.inputs.items()
+                    if name in params_set
+                },
+                "outputs": {
+                    name: param
+                    for name, param in schema.outputs.items()
+                    if name in params_set
+                },
+            }
+        )
 
     return schema.to_compact()
 
 
 class GetCabSchemaInput(BaseModel):
-    cab_name: str = Field(description="Cab name, e.g. 'wsclean', 'quartical', 'casa.bandpass'.")
+    cab_name: str = Field(
+        description="Cab name, e.g. 'wsclean', 'quartical', 'casa.bandpass'."
+    )
     section: Literal["inputs", "outputs", "all"] = Field(
         default="all", description="Which section(s) to include."
     )
+    detail: DetailLevel = Field(default=DEFAULT_DETAIL, description=_DETAIL_HELP)
 
 
 def get_cab_schema(input: GetCabSchemaInput) -> str:
@@ -95,43 +145,64 @@ def get_cab_schema(input: GetCabSchemaInput) -> str:
     and outputs (``param,dtype``), each under its own header line.
     """
     try:
-        schema = load_cab_schema(input.cab_name)
-    except ValueError as error:
+        schema = load_cab_schema(input.cab_name, detail=input.detail)
+    except (ValueError, StimelaConfigError) as error:
         return f"Error: {error}"
 
     parts: list[str] = []
 
     if input.section in ("inputs", "all"):
-        required = [(name, param) for name, param in schema.inputs.items() if param.required]
-        optional = [(name, param) for name, param in schema.inputs.items() if not param.required]
+        required = [
+            (name, param) for name, param in schema.inputs.items() if param.required
+        ]
+        optional = [
+            (name, param) for name, param in schema.inputs.items() if not param.required
+        ]
 
         if required:
             parts.append(f"# {input.cab_name} inputs")
-            parts.append(write_csv(
-                [{"param": name, "dtype": param.dtype, "writable": str(param.writable).lower()} for name, param in required],
-                ["param", "dtype", "writable"],
-            ))
+            parts.append(
+                write_csv(
+                    [
+                        {
+                            "param": name,
+                            "dtype": param.dtype,
+                            "writable": str(param.writable).lower(),
+                        }
+                        for name, param in required
+                    ],
+                    ["param", "dtype", "writable"],
+                )
+            )
 
         if optional:
             parts.append("# optional")
-            parts.append(write_csv(
-                [{"param": name, "dtype": param.dtype} for name, param in optional],
-                ["param", "dtype"],
-            ))
+            parts.append(
+                write_csv(
+                    [{"param": name, "dtype": param.dtype} for name, param in optional],
+                    ["param", "dtype"],
+                )
+            )
 
     if input.section in ("outputs", "all") and schema.outputs:
         parts.append(f"# {input.cab_name} outputs")
-        parts.append(write_csv(
-            [{"param": name, "dtype": param.dtype} for name, param in schema.outputs.items()],
-            ["param", "dtype"],
-        ))
+        parts.append(
+            write_csv(
+                [
+                    {"param": name, "dtype": param.dtype}
+                    for name, param in schema.outputs.items()
+                ],
+                ["param", "dtype"],
+            )
+        )
 
     return "\n".join(parts)
 
 
 class CabParamSpec(BaseModel):
     section: Literal["inputs", "outputs"] = Field(
-        default="inputs", description="Which side of the cab schema to look up params in."
+        default="inputs",
+        description="Which side of the cab schema to look up params in.",
     )
     params: list[str] = Field(
         description="Parameter names or fnmatch patterns, e.g. ['*', '*freq*', 'niter']."
@@ -139,12 +210,18 @@ class CabParamSpec(BaseModel):
 
 
 class GetCabParamsInput(BaseModel):
-    fields: list[Literal["dtype", "info", "required", "default", "choices", "writable", "examples"]] = Field(
-        default=[], description="Fields to return for every matched parameter. Empty means all fields."
+    fields: list[
+        Literal[
+            "dtype", "info", "required", "default", "choices", "writable", "category"
+        ]
+    ] = Field(
+        default=[],
+        description="Fields to return for every matched parameter. Empty means all fields.",
     )
     cabs: dict[str, CabParamSpec] = Field(
         description="Cab name mapped to the section and parameter patterns to query in it."
     )
+    detail: DetailLevel = Field(default=DEFAULT_DETAIL, description=_DETAIL_HELP)
 
 
 def _param_field_value(param: CabParam, field: str) -> str:
@@ -161,8 +238,8 @@ def _param_field_value(param: CabParam, field: str) -> str:
         return ";".join(param.choices) if param.choices else "null"
     if field == "writable":
         return str(param.writable).lower()
-    # examples: not present on cab params
-    return "null"
+    # category: stimela's own detail level for this parameter
+    return param.category
 
 
 def get_cab_params(input: GetCabParamsInput) -> str:
@@ -183,7 +260,9 @@ def get_cab_params(input: GetCabParamsInput) -> str:
         wsclean: {section: inputs, params: ["ms", "niter", "auto-threshold"]}
         casa.bandpass: {section: inputs, params: ["*"]}
     """
-    field_columns = [f for f in _AVAILABLE_FIELDS if not input.fields or f in set(input.fields)]
+    field_columns = [
+        f for f in _AVAILABLE_FIELDS if not input.fields or f in set(input.fields)
+    ]
     columns = ["cab", "section", "param"] + field_columns
 
     rows: list[dict[str, Any]] = []
@@ -192,9 +271,12 @@ def get_cab_params(input: GetCabParamsInput) -> str:
 
     for cab_name, spec in input.cabs.items():
         try:
-            schema = load_cab_schema(cab_name)
+            schema = load_cab_schema(cab_name, detail=input.detail)
         except ValueError:
             errors.append(f"# error: no cab '{cab_name}'")
+            continue
+        except StimelaConfigError as error:
+            errors.append(f"# error: {error}")
             continue
 
         param_pool = schema.inputs if spec.section == "inputs" else schema.outputs
@@ -209,7 +291,11 @@ def get_cab_params(input: GetCabParamsInput) -> str:
                     seen.add(param_name)
 
         for param_name in matched:
-            row: dict[str, Any] = {"cab": cab_name, "section": spec.section, "param": param_name}
+            row: dict[str, Any] = {
+                "cab": cab_name,
+                "section": spec.section,
+                "param": param_name,
+            }
             for field in field_columns:
                 row[field] = _param_field_value(param_pool[param_name], field)
             rows.append(row)

@@ -1,8 +1,10 @@
 """Shared pytest fixtures for boepie tests.
 
-Cab discovery uses runner.list_cab_names() which reads cultcargo YAML files
-directly - no MCP round-trip - so it is safe to use in test setup without
-any dependency on the tools under test.
+Cab discovery uses runner.list_cab_names(), which reads the resolved
+stimela config in-process - no MCP round-trip - so it is safe to use in
+test setup without any dependency on the tools under test. Loading that
+config costs about ten seconds the first time and is cached for the rest of
+the session, which is why the cab fixtures below are module-scoped.
 """
 
 from __future__ import annotations

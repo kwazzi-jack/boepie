@@ -11,12 +11,16 @@ import logging
 import os
 import shutil
 import tarfile
+import textwrap
 from pathlib import Path
 
-import click
 import httpx
 import tomlkit
-from rich.tree import Tree
+# rich_click is a drop-in for click that renders --help through rich, so every
+# `click.option`/`click.argument` below is the real click decorator and only
+# the help formatting changes. Imported under the name `click` because that is
+# what it is: swapping the alias back is the whole uninstall.
+import rich_click as click
 from rich.progress import (
     BarColumn,
     MofNCompleteColumn,
@@ -25,6 +29,7 @@ from rich.progress import (
     TimeElapsedColumn,
     TimeRemainingColumn,
 )
+from rich.tree import Tree
 
 from boepie import __version__, settings
 from boepie import _display as display
@@ -59,18 +64,18 @@ from boepie.context import (
     resolve_content_source,
 )
 from boepie.corpus import collection_index, sync_docs, sync_literature
-from boepie.corpus.layout import (
-    full_title_filename,
-    lookup_path,
-    unique_document_name,
-)
-from boepie.corpus.document import move_leaf_document, read_document
 from boepie.corpus.add import (
     AddOptions,
     AddOutcome,
     add_docs,
     add_literature,
     add_notes,
+)
+from boepie.corpus.document import move_leaf_document, read_document
+from boepie.corpus.layout import (
+    full_title_filename,
+    lookup_path,
+    unique_document_name,
 )
 from boepie.corpus.schema import KEY_FIELDS as _CORPUS_KEY_FIELDS
 from boepie.docs import DocsProject
@@ -79,8 +84,8 @@ from boepie.literature import ArxivPaper
 from boepie.literature import load_manifest as load_literature_manifest
 from boepie.rag import (
     ContextLoader,
-    EmptyCollectionError,
     DocsLoader,
+    EmptyCollectionError,
     LiteratureLoader,
     ModelBinding,
     NotesLoader,
@@ -105,6 +110,49 @@ from boepie.tools._retrieval import (
     search_with_lexical_fallback,
     with_note,
 )
+
+class _PlainErrorFormatter(click.RichHelpFormatter):
+    """rich-click's help formatter, with boepie's own aborts left plain.
+
+    rich-click renders every ClickException as a bordered panel and word-wraps
+    the message inside it, bypassing `ClickException.show` entirely. boepie's
+    abort messages routinely end by naming the command that fixes the problem,
+    and a wrap splits that across a border into something that cannot be
+    copied - the exact regression `CliError.show` exists to prevent. Usage
+    errors rich-click raises itself (unknown option, missing argument) keep
+    the panel, where it is genuinely clearer.
+    """
+
+    def write_error(self, error: click.ClickException) -> None:
+        if isinstance(error, CliError):
+            error.show()
+            return
+        super().write_error(error)
+
+
+# Set on the context class rather than on the group: rich-click builds the
+# error formatter from whichever context is current, which for any failure
+# below the top level is the subcommand's own.
+click.RichContext.formatter_class = _PlainErrorFormatter
+
+# rich-click's own defaults already name only the eight standard ANSI colours,
+# which is boepie's rule for the same reason (see `_display.THEME`): they
+# resolve against the user's own palette and stay legible on a light
+# background. Three deviations:
+# - `max_width`, because help text set to the full width of a wide terminal
+#   is a paragraph a screen and a half long and unreadable as prose.
+# - `style_option`/`style_argument` plain cyan rather than bold cyan, which
+#   `_display` reserves for a *suggested command* - the one thing in boepie's
+#   output a reader is meant to copy and run.
+# - `style_metavar` dim rather than bold yellow: yellow is the warning colour
+#   everywhere else, and a help screen full of it reads as a page of alarms.
+_HELP_CONFIG = click.RichHelpConfiguration(
+    max_width=100,
+    style_option="cyan",
+    style_argument="cyan",
+    style_metavar="dim",
+)
+
 
 # Maps a collection name to the loader that builds it.
 # Context loader requires bundle_dir passed to __init__, so it's not here.
@@ -182,6 +230,62 @@ class CollectionList(click.ParamType):
         return tuple(name for name in self.choices if name in chosen)
 
 
+# Every `status` command reports the same rows for each of several things, so
+# they are laid out as a label column with the values lined up beside it: a
+# reader scans down one column of numbers instead of hunting for them inside
+# differently worded sentences. The label carries the severity colour, which
+# makes that same scan answer "is anything wrong" without reading a word.
+_STATUS_LABEL_WIDTH = 11
+
+
+def _status_label(label: str) -> str:
+    """A status row's label, padded so every row's value starts in one column.
+
+    `_line` puts a single space after a `lead`, so padding to one less than
+    the column width lands the value exactly on it.
+    """
+    return f"{label}:".ljust(_STATUS_LABEL_WIDTH - 1)
+
+
+# Where a status row's value starts, for the continuation lines of a wrapped
+# value and for any extra line that belongs to the row above it.
+_STATUS_VALUE_INDENT = " " * (2 + _STATUS_LABEL_WIDTH)
+
+
+def _wrap_into_value_column(names: list[str]) -> list[str]:
+    """`names` as a comma-separated list, wrapped to the value column's width.
+
+    Wrapped here rather than left to rich because these lists run long - 17
+    citekeys is three terminal lines - and rich restarts each continuation at
+    column zero, where it collides with the next heading and the block stops
+    reading as one value.
+    """
+    width = max(console.width - (2 + _STATUS_LABEL_WIDTH), 24)
+    return textwrap.wrap(", ".join(names), width=width)
+
+
+def _status_items(names: list[str]) -> None:
+    """The names behind a status count, below the row that counted them.
+
+    Dim, because the count and the label above are the message; the names are
+    the reference detail.
+    """
+    for line in _wrap_into_value_column(names):
+        display.muted(line, indent=_STATUS_VALUE_INDENT)
+
+
+def _status_list(label: str, names: list[str]) -> None:
+    """A status row whose value *is* the list, starting on the label's line.
+
+    The alternative - a count row with the names underneath - restates itself
+    whenever the count is one, which is the common case for index ids.
+    """
+    lines = _wrap_into_value_column(names)
+    display.muted(lines[0], lead=_status_label(label), indent="  ")
+    for line in lines[1:]:
+        display.muted(line, indent=_STATUS_VALUE_INDENT)
+
+
 def _index_root_for_collection(collection: str) -> Path:
     """Where `collection`'s index lives: inside the bundle governing the cwd
     for `context`, the machine-global store for every other collection."""
@@ -220,6 +324,7 @@ def _run(coro):
 
 
 @click.group()
+@click.rich_config(help_config=_HELP_CONFIG)
 @click.version_option(version=__version__, prog_name="boepie")
 def cli() -> None:
     """Boepie - MCP server for AI-assisted stimela pipeline creation."""
@@ -521,7 +626,9 @@ def index_status() -> None:
         display.warning("No indices built or fetched yet.")
         return
 
-    for collection_name, index_ids in sorted(collections_with_indices.items()):
+    for position, (collection_name, index_ids) in enumerate(
+        sorted(collections_with_indices.items())
+    ):
         latest_link = INDEX_DIR / collection_name / "latest.json"
         if latest_link.exists():
             latest_data = json.loads(latest_link.read_text(encoding="utf-8"))
@@ -529,10 +636,17 @@ def index_status() -> None:
         else:
             active_id = "none"
 
-        display.heading(
-            f"active={active_id}, available=[{', '.join(index_ids)}]",
-            lead=f"{collection_name}:",
+        if position:
+            console.print()
+        console.print(
+            display.collection_root(collection_name, INDEX_DIR / collection_name),
+            soft_wrap=True,
         )
+
+        # An index with nothing pointing at it cannot be searched, so "none"
+        # is the one value here that is a problem rather than a fact.
+        report = display.muted if active_id != "none" else display.warning
+        report(active_id, lead=_status_label("active"), indent="  ")
 
         if active_id != "none" and active_id in index_ids:
             manifest_path = INDEX_DIR / collection_name / active_id / "manifest.json"
@@ -541,8 +655,16 @@ def index_status() -> None:
                 embedding_kind = manifest.get("embedding_kind")
                 embedding_model = manifest.get("embedding_model")
                 display.muted(
-                    f"embedding: {embedding_kind}:{embedding_model}", indent="  "
+                    f"{embedding_kind}:{embedding_model}",
+                    lead=_status_label("embedding"),
+                    indent="  ",
                 )
+
+        # Only what you could switch *to*: repeating the active id under
+        # "available" is the one-element case saying nothing twice.
+        alternatives = [index_id for index_id in index_ids if index_id != active_id]
+        if alternatives:
+            _status_list("others", alternatives)
 
 
 @index.command("list")
@@ -555,20 +677,29 @@ def index_list() -> None:
         display.warning(f"No index directory yet at {INDEX_DIR}")
         return
 
-    found_any = False
+    listed: dict[str, list[str]] = {}
     for collection_dir in sorted(INDEX_DIR.iterdir()):
         if not collection_dir.is_dir():
             continue
-        index_ids: list[str] = []
-        for item in sorted(collection_dir.iterdir()):
-            if item.is_dir() and item.name not in (".", ".."):
-                index_ids.append(item.name)
+        index_ids = sorted(
+            item.name
+            for item in collection_dir.iterdir()
+            if item.is_dir() and item.name not in (".", "..")
+        )
         if index_ids:
-            display.heading(", ".join(index_ids), lead=f"{collection_dir.name}:")
-            found_any = True
+            listed[collection_dir.name] = index_ids
 
-    if not found_any:
+    if not listed:
         display.warning("No indices found.")
+        return
+
+    # Aligned on the longest collection name rather than on the fixed status
+    # column: here the label is the name, not one of a known set of rows.
+    label_width = max(len(name) for name in listed) + 2
+    for collection_name, index_ids in listed.items():
+        display.muted(
+            ", ".join(index_ids), lead=f"{collection_name}:".ljust(label_width - 1)
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -585,6 +716,7 @@ def index_list() -> None:
 # bibliographic manifest. Papers with no arXiv presence (pre-arXiv-era, or
 # never preprinted) fall to the BYO-PDF path: `corpus add literature
 # <file.pdf>` against a copy you supply, converted with MinerU.
+
 
 def _corpus_collection_dir(collection: str) -> Path:
     """`collection`'s on-disk root, looked up by name at call time (not
@@ -615,18 +747,22 @@ def corpus() -> None:
 def _add_options(function):
     """Options every `corpus add` subcommand shares."""
     function = click.option(
-        "--title", default=None,
+        "--title",
+        default=None,
         help="Override the derived title. With several identifiers this "
-             "applies to each, so it is usually only useful for one.",
+        "applies to each, so it is usually only useful for one.",
     )(function)
     function = click.option(
-        "--group", default=None, metavar="PATH",
+        "--group",
+        default=None,
+        metavar="PATH",
         help="Place the document inside a group, e.g. calibration/subtopic.",
     )(function)
     function = click.option(
-        "--keep-original/--no-keep-original", default=None,
+        "--keep-original/--no-keep-original",
+        default=None,
         help="Retain the source bytes alongside the Markdown "
-             f"(default: corpus.keep_original).",
+        f"(default: corpus.keep_original).",
     )(function)
     return function
 
@@ -658,9 +794,11 @@ def _report_add(collection: str, outcomes: list[AddOutcome]) -> None:
             via = f" via {outcome.via}" if outcome.via else ""
             detail = f" ({outcome.detail})" if outcome.detail else ""
             display.success(
-                f"{outcome.title} (id={outcome.document_id}{via}){detail}"
-                if outcome.document_id
-                else f"{outcome.title}{detail}",
+                (
+                    f"{outcome.title} (id={outcome.document_id}{via}){detail}"
+                    if outcome.document_id
+                    else f"{outcome.title}{detail}"
+                ),
                 lead="added",
             )
             if outcome.notice and CORPUS_WARN_ON_DOTFILE_TITLE:
@@ -708,8 +846,11 @@ def corpus_add() -> None:
 @click.option("--citekey", default=None, help="Override the derived citekey.")
 @_add_options
 def corpus_add_literature(
-    identifiers: tuple[str, ...], citekey: str | None, title: str | None,
-    group: str | None, keep_original: bool | None,
+    identifiers: tuple[str, ...],
+    citekey: str | None,
+    title: str | None,
+    group: str | None,
+    keep_original: bool | None,
 ) -> None:
     """Add papers by arXiv id, DOI, .bib file, PDF, or URL.
 
@@ -730,14 +871,18 @@ def corpus_add_literature(
 @corpus_add.command("docs")
 @click.argument("identifiers", nargs=-1, required=True)
 @click.option(
-    "--project", required=True,
+    "--project",
+    required=True,
     help="Project name: the group these pages live under, and what "
-         "search_docs filters on.",
+    "search_docs filters on.",
 )
 @_add_options
 def corpus_add_docs(
-    identifiers: tuple[str, ...], project: str, title: str | None,
-    group: str | None, keep_original: bool | None,
+    identifiers: tuple[str, ...],
+    project: str,
+    title: str | None,
+    group: str | None,
+    keep_original: bool | None,
 ) -> None:
     """Add documentation from a site URL or a local file.
 
@@ -756,7 +901,9 @@ def corpus_add_docs(
 @click.argument("identifiers", nargs=-1, required=True)
 @_add_options
 def corpus_add_notes(
-    identifiers: tuple[str, ...], title: str | None, group: str | None,
+    identifiers: tuple[str, ...],
+    title: str | None,
+    group: str | None,
     keep_original: bool | None,
 ) -> None:
     """Add your own files or web pages to the notes corpus.
@@ -766,9 +913,7 @@ def corpus_add_notes(
     to Markdown one page at a time. Notes are machine-global, separate from a
     project's `.boepie/` bundle.
     """
-    options = _build_add_options(
-        title=title, group=group, keep_original=keep_original
-    )
+    options = _build_add_options(title=title, group=group, keep_original=keep_original)
     _report_add("notes", add_notes(NOTES_DIR, identifiers, options))
 
 
@@ -790,7 +935,8 @@ def corpus_remove(collection: str, document_ids: tuple[str, ...], yes: bool) -> 
     documents = {
         document.id: document
         for document in collection_index(
-            collection_dir, collection=collection,
+            collection_dir,
+            collection=collection,
             key_fields=_CORPUS_KEY_FIELDS[collection],
         )
     }
@@ -930,19 +1076,30 @@ def _corpus_fetch_literature(
     deleted = sum(1 for r in results if r.action == "deleted")
     unavailable = [r for r in results if r.action == "unavailable"]
 
+    console.print(
+        display.collection_root("literature", LITERATURE_DIR), soft_wrap=True
+    )
     display.success(
         f"{added} added, {refetched} refetched, "
-        f"{skipped} skipped, {deleted} deleted into {LITERATURE_DIR}.",
-        lead="literature:",
+        f"{skipped} skipped, {deleted} deleted",
+        lead=_status_label("fetched"),
+        indent="  ",
     )
     if unavailable:
-        citekeys = ", ".join(r.citekey for r in unavailable)
         display.warning(
-            f"{citekeys}. Supply the PDF instead: "
-            f"boepie corpus add literature <file.pdf>",
-            lead=f"Not available in HTML ({len(unavailable)}):",
+            f"{len(unavailable)} paper(s) have no HTML rendering at arxiv.org "
+            f"or ar5iv",
+            lead=_status_label("no HTML"),
+            indent="  ",
         )
-    display.next_step("boepie index build --collection literature")
+        _status_items([result.citekey for result in unavailable])
+        # In the value column, so it reads as part of the row above rather
+        # than as the command's own closing advice - which the Next: line is.
+        display.info(
+            "supply the PDF: boepie corpus add literature <file.pdf>",
+            indent=_STATUS_VALUE_INDENT,
+        )
+    display.next_step("boepie index build --collection literature", indent="  ")
 
 
 def _corpus_fetch_docs(
@@ -982,15 +1139,21 @@ def _corpus_fetch_docs(
     total_deleted = sum(r.deleted for r in results)
     total_failures = sum(len(r.failures) for r in results)
 
+    console.print(display.collection_root("docs", DOCS_DIR), soft_wrap=True)
     display.success(
         f"{total_added} added, {total_refetched} refetched, "
-        f"{total_skipped} skipped, {total_deleted} deleted across "
-        f"{len(results)} project(s) into {DOCS_DIR}"
-        + (f" ({total_failures} page failure(s))" if total_failures else "")
-        + ".",
-        lead="docs:",
+        f"{total_skipped} skipped, {total_deleted} deleted "
+        f"across {len(results)} project(s)",
+        lead=_status_label("fetched"),
+        indent="  ",
     )
-    display.next_step("boepie index build --collection docs")
+    if total_failures:
+        display.warning(
+            f"{total_failures} page(s) could not be fetched",
+            lead=_status_label("failures"),
+            indent="  ",
+        )
+    display.next_step("boepie index build --collection docs", indent="  ")
 
 
 @contextlib.contextmanager
@@ -1023,9 +1186,7 @@ def _no_bundle_error() -> CliError:
     )
 
 
-def _no_such_document_error(
-    document_id: str, collections: tuple[str, ...]
-) -> CliError:
+def _no_such_document_error(document_id: str, collections: tuple[str, ...]) -> CliError:
     """That id is not in the corpus.
 
     One message wherever it is raised. The three call sites used to suggest
@@ -1060,7 +1221,9 @@ def _corpus_documents(collection: str):
 def _managed_counts(documents) -> tuple[int, int]:
     """(boepie-managed, yours) - the split that decides what `fetch` may touch."""
     boepie_managed = sum(
-        1 for document in documents if document.frontmatter.get("managed_by") == "boepie"
+        1
+        for document in documents
+        if document.frontmatter.get("managed_by") == "boepie"
     )
     return boepie_managed, len(documents) - boepie_managed
 
@@ -1081,34 +1244,38 @@ def corpus_status(collections: tuple[str, ...]) -> None:
     Every collection reports the same three things - how much is boepie's,
     how much is yours, and what is out of step with the packaged manifest.
     """
-    for collection in collections:
-        _corpus_status_one(collection)
+    for position, collection in enumerate(collections):
+        _corpus_status_one(collection, first=position == 0)
 
 
-def _corpus_status_one(collection: str) -> None:
+def _corpus_status_one(collection: str, *, first: bool) -> None:
     collection_dir = _corpus_collection_dir(collection)
     documents = _corpus_documents(collection)
     boepie_managed, user_managed = _managed_counts(documents)
 
-    # The two spaces are the layout: a heading and the directory it names.
-    display.heading(f" {collection_dir}", lead=collection)
-    display.info(
-        f"{len(documents)} document(s): {boepie_managed} boepie-managed, "
+    # A blank line between collections: three of these run together
+    # otherwise, and the heading is the only thing separating them.
+    if not first:
+        console.print()
+    # soft_wrap, or rich breaks a long corpus path mid-token across two lines.
+    console.print(display.collection_root(collection, collection_dir), soft_wrap=True)
+    display.muted(
+        f"{len(documents)} total, {boepie_managed} boepie-managed, "
         f"{user_managed} yours",
+        lead=_status_label("documents"),
         indent="  ",
     )
 
     if collection == "notes":
         # No manifest to diff against: notes are always yours.
         if not documents:
-            display.info(
-                "Nothing added yet. Try: boepie corpus add notes <file-or-url>",
-                indent="  ",
-            )
+            display.next_step("boepie corpus add notes <file-or-url>", indent="  ")
         return
 
     if collection == "literature":
-        entries = {paper.citekey: paper for paper in load_literature_manifest(LITERATURE_DIR)}
+        entries = {
+            paper.citekey: paper for paper in load_literature_manifest(LITERATURE_DIR)
+        }
         present = {
             document.natural_key
             for document in documents
@@ -1135,23 +1302,27 @@ def _corpus_status_one(collection: str) -> None:
 
     if missing:
         display.warning(
-            ", ".join(missing),
-            lead=f"{len(missing)} {label}(s) in the manifest not fetched yet:",
+            f"{len(missing)} {label}(s) in the manifest not fetched yet",
+            lead=_status_label("missing"),
             indent="  ",
         )
+        _status_items(missing)
     if orphaned:
         display.warning(
-            ", ".join(orphaned),
-            lead=f"{len(orphaned)} {label}(s) no longer in the manifest "
-            f"(next fetch deletes them):",
+            f"{len(orphaned)} {label}(s) no longer in the manifest "
+            f"(next fetch deletes them)",
+            lead=_status_label("orphaned"),
             indent="  ",
         )
+        _status_items(orphaned)
     if not missing and not orphaned:
-        display.success("In step with the packaged manifest.", indent="  ")
-    else:
-        display.next_step(
-            f"boepie corpus fetch --collection {collection}", indent="  "
+        display.success(
+            "in step with the packaged manifest",
+            lead=_status_label("manifest"),
+            indent="  ",
         )
+    else:
+        display.next_step(f"boepie corpus fetch --collection {collection}", indent="  ")
 
 
 @corpus.command("list")
@@ -1187,7 +1358,7 @@ def _corpus_list_one(collection: str) -> None:
     ):
         title = document.frontmatter.get("title") or document.id
         managed_by = document.frontmatter.get("managed_by", "?")
-        console.print(display.document_line(str(title), document.id, managed_by))
+        display.document_entry(str(title), document.id, managed_by)
     display.info(f"{len(documents)} document(s).", indent="\n")
 
 
@@ -1197,7 +1368,9 @@ def _corpus_list_one(collection: str) -> None:
 )
 @click.argument("document_id")
 @click.option(
-    "--group", default=None, metavar="PATH",
+    "--group",
+    default=None,
+    metavar="PATH",
     help="New group, e.g. calibration/gains. Pass '' to move to the top level.",
 )
 @click.option("--title", default=None, help="New title, which also renames the file.")
@@ -1225,9 +1398,7 @@ def corpus_move(
 
     # Uniqueness is collection-wide, and this document's own current name must
     # not count against it or a pure regroup would gratuitously suffix itself.
-    taken = {
-        other.reserved_filename for other in documents if other.id != document_id
-    }
+    taken = {other.reserved_filename for other in documents if other.id != document_id}
     filename = unique_document_name(full_title_filename(new_title), taken)
 
     if group is None:
@@ -1299,7 +1470,7 @@ def _corpus_tree_one(collection: str) -> None:
         )
         return
 
-    tree = Tree(display.tree_root(collection, collection_dir))
+    tree = Tree(display.collection_root(collection, collection_dir))
     branches: dict[str, Tree] = {}
 
     def branch_for(relative_group: Path) -> Tree:
@@ -1340,6 +1511,7 @@ def _corpus_tree_one(collection: str) -> None:
 # at a specific dev index, and a `--json` mode. The context collection is
 # BM25-only (embedding=None, mode='bm25'); its hits are bundle paths and it has
 # no read counterpart.
+
 
 def _emit_outcome_error(error: str) -> None:
     """Turn a SearchOutcome error string (already 'Error: ...') into a
@@ -1433,14 +1605,14 @@ def _hits_as_json(
     default=None,
     metavar="PATTERN",
     help="Restrict to documents filed under a group, shell-style: "
-         "'quartical', 'calibration/*', '**/gains'. Quote it - your shell "
-         "expands an unquoted '*' against the working directory first.",
+    "'quartical', 'calibration/*', '**/gains'. Quote it - your shell "
+    "expands an unquoted '*' against the working directory first.",
 )
 @click.option(
     "--project",
     default=None,
     help="Docs only: alias for --group, since a docs page's project is the "
-         "group it lives in.",
+    "group it lives in.",
 )
 @click.option(
     "--index-name",
@@ -1508,9 +1680,7 @@ def search_cli(
                 index_root=_index_root_for_collection(collection),
                 # No dense leg in the bundle's lexical-only context index.
                 embedding=(
-                    None
-                    if collection == _CONTEXT_COLLECTION
-                    else resolve_embedding()
+                    None if collection == _CONTEXT_COLLECTION else resolve_embedding()
                 ),
                 index_id=index_name,
             )
@@ -1551,7 +1721,10 @@ def search_cli(
         )
     else:
         payload = format_merged_hits(
-            question, ranked, collections=collections, snippet=snippet,
+            question,
+            ranked,
+            collections=collections,
+            snippet=snippet,
             score_detail=True,
         )
     display.hits(with_note(payload, note))
@@ -1589,7 +1762,7 @@ def _search_filters(
     show_default=True,
     type=CollectionList(_READ_COLLECTIONS),
     help="Comma-separated collections to look in, or 'all'. context has no "
-         "read: open its source path directly.",
+    "read: open its source path directly.",
 )
 @click.option(
     "--chunk-index",
@@ -1956,9 +2129,7 @@ def context_reset(directory: str, yes: bool) -> None:
     target_dir = Path(directory).resolve()
     bundle_dir = target_dir / ".boepie"
     if not bundle_dir.exists():
-        raise CliError(
-            f"no bundle at {bundle_dir}. Run 'boepie context init' first."
-        )
+        raise CliError(f"no bundle at {bundle_dir}. Run 'boepie context init' first.")
 
     local_paths = list_source_local_files(bundle_dir)
     if local_paths and not yes:
@@ -2335,7 +2506,9 @@ def config_show(sources: bool) -> None:
 
 @config.command("get")
 @click.argument("key")
-@click.option("--source", is_flag=True, help="Print which layer supplied the value too.")
+@click.option(
+    "--source", is_flag=True, help="Print which layer supplied the value too."
+)
 def config_get(key: str, source: bool) -> None:
     """Print one setting's resolved value, e.g. `boepie config get embedding.binding`."""
     _check_known_key(key)

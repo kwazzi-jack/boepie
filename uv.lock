@@ -145,6 +145,7 @@ dependencies = [
     { name = "python-casacore" },
     { name = "pyyaml" },
     { name = "rich" },
+    { name = "rich-click" },
     { name = "stimela" },
     { name = "tomlkit" },
 ]
@@ -170,7 +171,7 @@ requires-dist = [
     { name = "beautifulsoup4", specifier = ">=4.15.0" },
     { name = "bm25s", specifier = ">=0.3.9" },
     { name = "click", specifier = "==8.4.2" },
-    { name = "cult-cargo", specifier = ">=0.2.0" },
+    { name = "cult-cargo", specifier = ">=0.2.1" },
     { name = "fastembed", specifier = ">=0.8.0" },
     { name = "fastmcp", specifier = "==3.4.7" },
     { name = "httpx", specifier = ">=0.28.1" },
@@ -187,7 +188,8 @@ requires-dist = [
     { name = "python-casacore", specifier = "==3.8.1" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "rich", specifier = ">=13.0.0" },
-    { name = "stimela", git = "https://github.com/caracal-pipeline/stimela.git?branch=master" },
+    { name = "rich-click", specifier = ">=1.9.8" },
+    { name = "stimela", specifier = ">=2.1.4,<3" },
     { name = "tomlkit", specifier = ">=0.15.1" },
 ]
 provides-extras = ["mineru"]
@@ -708,15 +710,15 @@ nvtx = [
 
 [[package]]
 name = "cult-cargo"
-version = "0.2.0"
+version = "0.2.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "requests" },
     { name = "stimela" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/d0/93/83c825c914344cc628810e0c8f8223c19df8b4bfc45364efd52928bad35d/cult_cargo-0.2.0.tar.gz", hash = "sha256:eeb2f27855185e74e4f2f1cfcf8e8b2ba273276102aa9ce0967fbbe2b9aa5b5f", size = 78680, upload-time = "2025-05-28T14:19:36.088Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/d0/95/75cd8753070cec70f1a096c676d0d1b141b0d499770091b2b9ada3f4df64/cult_cargo-0.2.1.tar.gz", hash = "sha256:511a596767654bd26eabeb7b6114c2ea2db7e8901b45de70ae6583b6194af0b4", size = 86959, upload-time = "2026-05-22T11:30:14.46Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/78/4b/efcc261ffd303bb920dac468c9073edc08b72bd6dad16087781bf3b240ef/cult_cargo-0.2.0-py3-none-any.whl", hash = "sha256:00084ee9d11cf5dd97b88108d5bf43eb6962d9a50c042f12c5948f188d94bf5b", size = 115888, upload-time = "2025-05-28T14:19:34.592Z" },
+    { url = "https://files.pythonhosted.org/packages/ec/ac/8f5f950432325769ae8ac4fc1d6adf4840321daf289798e91d74d89af173/cult_cargo-0.2.1-py3-none-any.whl", hash = "sha256:6dbed2994c9349f3cdf8137ad9e152d94b08653db36ea6c500a3f0e398544ca5", size = 125194, upload-time = "2026-05-22T11:30:15.727Z" },
 ]
 
 [[package]]
@@ -3055,6 +3057,20 @@ wheels = [
 ]
 
 [[package]]
+name = "rich-click"
+version = "1.9.8"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "click" },
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "rich" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f7/ea/21e4867ea0ef881ffd4c0550fc21a061435e50d6324bcd034396633cbc18/rich_click-1.9.8.tar.gz", hash = "sha256:4008f921da88b5d91646c134ec881c1500e5a6b3f093e90e8f29400e09608371", size = 75363, upload-time = "2026-05-28T19:54:59.144Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/6d/97/a87901aef6b7e7e4a34c6dd6cc17dca8594a592ef9d9dd765fca2b7facf7/rich_click-1.9.8-py3-none-any.whl", hash = "sha256:12873865396e6927835d4eabb1cc3996edcd65b7ac9b2391a29eca4f335a2f93", size = 72189, upload-time = "2026-05-28T19:54:57.867Z" },
+]
+
+[[package]]
 name = "rich-rst"
 version = "2.1.0"
 source = { registry = "https://pypi.org/simple" }
@@ -3350,7 +3366,7 @@ wheels = [
 [[package]]
 name = "stimela"
 version = "2.2.0rc1"
-source = { git = "https://github.com/caracal-pipeline/stimela.git?branch=master#cde3c156fc5a17eaae42304cf525c08de1370314" }
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "click" },
     { name = "munch" },
@@ -3360,6 +3376,10 @@ dependencies = [
     { name = "python-benedict" },
     { name = "rich" },
     { name = "scabha" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/74/c7/957f8aaf90f7b6f78080a839bc855fe741d21256f77418563572d0a5ecf5/stimela-2.2.0rc1.tar.gz", hash = "sha256:4444a0650a3e6442078126cebd6c73a63f914cf32770d302281cf716c8227ae5", size = 127380, upload-time = "2026-05-19T13:35:39.015Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/4e/31/a793a5572856c7264b838cca83637d2f8d9220094086144b02de9f001b7e/stimela-2.2.0rc1-py3-none-any.whl", hash = "sha256:ab3cb19608046f9fbe1e60c3246c8f415bc3025ae1e3ea7482a7f75868cb63a8", size = 157195, upload-time = "2026-05-19T13:35:37.365Z" },
 ]
 
 [[package]]

@@ -355,15 +355,24 @@ async def _prompt_object_value(
 
     Returns None if the user leaves any required field blank, which signals
     end-of-list when collecting arrays of objects.
+
+    An object that collected nothing collapses to None only when it is
+    *optional*. A required one stays an empty dict: FastMCP renders a tool
+    whose single argument is a pydantic model as one required ``input``
+    property, so dropping it because every field inside was left blank sends
+    `{}` instead of `{"input": {}}` and the call fails validation with
+    "Missing required argument". Every field of `ListRecipesInput` is
+    optional, which is how that first showed up.
     """
     add_props: dict[str, Any] | None = param_schema.get("additionalProperties")
     sub_properties: dict[str, Any] = param_schema.get("properties") or {}
 
     if add_props and isinstance(add_props, dict) and not sub_properties:
-        return await _prompt_dict_value(session, tool, param_name, add_props) or None
+        entries = await _prompt_dict_value(session, tool, param_name, add_props)
+        return entries if entries or is_required else None
 
     if not sub_properties:
-        return None
+        return {} if is_required else None
 
     required_sub = set(param_schema.get("required") or [])
     console.print(f"[dim]{param_name} (object) - enter sub-fields:[/dim]")
@@ -377,10 +386,17 @@ async def _prompt_object_value(
             session, tool, f"{param_name}.{sub_name}", sub_schema, sub_required
         )
         if sub_required and not value:
+            # Blank-means-stop only makes sense while collecting list items,
+            # where this object is optional. On an object the tool actually
+            # requires, silently returning None drops the argument and the
+            # user gets FastMCP's "Missing required argument" instead of
+            # being told which field they skipped.
+            if is_required:
+                raise ValueError(f"{param_name}.{sub_name} is required")
             return None
         if value is not None:
             result[sub_name] = value
-    return result or None
+    return result if result or is_required else None
 
 
 async def _prompt_param_value(

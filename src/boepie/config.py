@@ -262,6 +262,42 @@ INGESTION_USE_MCP_SAMPLING: bool = _SETTINGS.ingestion.use_mcp_sampling
 INGESTION_DEFAULT_COLLECTION: str = _SETTINGS.ingestion.default_collection
 
 # ---------------------------------------------------------------------------
+# Pipeline: which stimela libraries the cab and recipe tools see
+# ---------------------------------------------------------------------------
+
+# stimela sources merged into the resolved config the cab and recipe tools
+# read, in stimela's own spelling (`cultcargo::`, `otherlib.recipes::`, a
+# plain path). Loading them is a one-off ~10s cost per process, so this list
+# is deliberately for *installed libraries* only: a recipe file the user is
+# working on is layered on per call instead, via a recipe tool's
+# `recipe_file` argument.
+PIPELINE_SOURCES: list[str] = list(_SETTINGS.pipeline.sources)
+
+# Whether to scan the installed environment for stimela libraries on top of
+# PIPELINE_SOURCES. On by default: `stimela doc otherlib.recipes::thing` is a
+# runtime lookup against whatever the user typed, so a server reading only a
+# configured list is blind to a library already installed in the same venv -
+# and an agent cannot be expected to invent that `module::path` spelling.
+#
+# Env-var-only rather than a `config show` key: for everyday use there is
+# nothing to tune, since discovery is what makes the common case need no
+# configuration at all. The off switch exists for reproducibility - pinning
+# exactly which libraries an agent can see, which matters when comparing
+# runs - not as a preference.
+PIPELINE_DISCOVER: bool = os.environ.get(
+    "BOEPIE_PIPELINE_DISCOVER", "1"
+).strip().lower() not in ("0", "false", "no")
+
+# Where scabha caches parsed configs. Pointed at stimela's own cache
+# directory rather than scabha's `~/.cache/configuratt` default so boepie
+# and the `stimela` CLI share one cache instead of each paying the parse.
+# `stimela.main` sets exactly this; nothing else does, so an in-process
+# caller has to set it itself.
+STIMELA_CONFIG_CACHE_DIR: Path = Path(
+    os.environ.get("BOEPIE_STIMELA_CONFIG_CACHE_DIR", str(Path.home() / ".cache" / "stimela-configs"))
+)
+
+# ---------------------------------------------------------------------------
 # Sync: staleness checks (soft nudges only - never OS-level scheduling, never
 # a self-update)
 # ---------------------------------------------------------------------------

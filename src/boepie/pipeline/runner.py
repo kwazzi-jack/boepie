@@ -1,34 +1,38 @@
-"""Subprocess wrapper for invoking stimela.
+"""Running stimela, and projecting its schemas into boepie's own shapes.
 
-All stimela interaction goes through this module. stimela and cult-cargo
-are installed into boepie's own environment, so schema inspection can use
-direct imports while recipe execution still runs stimela as a subprocess.
+Two halves, and they use stimela differently on purpose:
+
+- **Execution** (`stimela_run`) shells out to the `stimela` binary in the
+  same venv, so a recipe runs exactly as it would from the user's terminal.
+- **Inspection** (`load_cab_schema`, `load_recipe_schema`) goes in-process
+  through `boepie.pipeline.stimela_config`, which drives stimela's own
+  config-loading chain. Nothing here parses YAML: the flattening of nested
+  parameter groups, `_use` inheritance, and parameter categories are all
+  `Cab.finalize`/`Recipe.finalize`'s work.
+
+`CabParam` and `CabSchema` exist because scabha's `Parameter` carries far
+more than an MCP response should - path policies, argument-passing
+policies, substitution flags, metavars. These are the projection down to
+what an agent writing a recipe actually needs.
 """
 
 from __future__ import annotations
 
-import functools
-import json
 import os
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-import cultcargo
-from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel
-import scabha.configuratt as configuratt
+from scabha.basetypes import UNSET
+from scabha.cargo import Parameter, ParameterCategory
+
+from boepie.pipeline.stimela_config import LoadedConfig, loaded_config
 
 # stimela executable from the same venv as the running interpreter.
 _STIMELA_CMD: list[str] = [str(Path(sys.executable).parent / "stimela")]
-
-# cultcargo package directory - where cab YAML definitions live.
-_CULTCARGO_DIR: Path = Path(cultcargo.__file__).parent
-
-# Glob patterns matching cab YAMLs in the order stimela's MANIFEST loads them.
-_CAB_GLOB_PATTERNS: list[str] = ["*.yml", "casa/*.yml"]
 
 # stimela renders its (rich-based) log formatter to this many columns
 # regardless of TTY, wrapping long lines - including file paths - mid-token.
@@ -36,81 +40,6 @@ _CAB_GLOB_PATTERNS: list[str] = ["*.yml", "casa/*.yml"]
 # child env (see stimela_run). _clean_lines still strips the padding rich
 # adds to fill each line out to this width.
 _WIDE_COLUMNS = "2000"
-
-
-class StimelaType(BaseModel):
-    """Base model for a stimela/scabha built-in parameter type.
-
-    ``base`` is the immediate parent in the scabha class hierarchy.
-    ``python_type`` is the underlying Python primitive it ultimately wraps.
-    ``examples`` are sample values that would be valid for this type.
-    """
-
-    name: str
-    base: str
-    python_type: str
-    description: str
-    examples: list[str]
-
-
-class URIType(StimelaType):
-    name: str = "URI"
-    base: str = "str"
-    python_type: str = "str"
-    description: str = (
-        "A Uniform Resource Identifier - a string that supports local paths "
-        "and remote schemes like file://, s3://."
-    )
-    examples: list[str] = [
-        "/local/path/to/file",
-        "file:///abs/path/to/file",
-        "s3://bucket-name/key",
-    ]
-
-
-class FileType(StimelaType):
-    name: str = "File"
-    base: str = "URI"
-    python_type: str = "str"
-    description: str = "A file path (local or remote URI) pointing at a single file."
-    examples: list[str] = [
-        "config.yaml",
-        "/data/model.fits",
-        "s3://bucket/model.fits",
-    ]
-
-
-class DirectoryType(StimelaType):
-    name: str = "Directory"
-    base: str = "File"
-    python_type: str = "str"
-    description: str = "A directory path (local or remote URI)."
-    examples: list[str] = [
-        "/output/images/",
-        "/tmp/workdir",
-        "s3://bucket/output/",
-    ]
-
-
-class MSType(StimelaType):
-    name: str = "MS"
-    base: str = "Directory"
-    python_type: str = "str"
-    description: str = (
-        "Measurement Set - radio astronomy visibility data format stored as a directory "
-        "(CASA table). Typically ends in .ms or .MS."
-    )
-    examples: list[str] = [
-        "/data/observation.ms",
-        "target_field.MS",
-        "s3://bucket/calibrator.ms",
-    ]
-
-
-_STIMELA_TYPES: dict[str, StimelaType] = {
-    type_instance.name: type_instance
-    for type_instance in (URIType(), FileType(), DirectoryType(), MSType())
-}
 
 
 @dataclass(frozen=True)
@@ -174,47 +103,45 @@ def find_recipe_logs(directory: Path) -> list[Path]:
     return sorted(directory.glob("log-*.txt"))
 
 
-@functools.cache
-def _load_cultcargo_config() -> DictConfig:
-    """Load and merge all cultcargo YAMLs into one resolved config.
+# ---------------------------------------------------------------------------
+# Schema projection
+# ---------------------------------------------------------------------------
 
-    Loads in manifest order so that cross-file ``_use`` references resolve
-    correctly. YAMLs that fail to load are skipped with a warning.
-    """
-    merged: DictConfig = OmegaConf.create({})
-    for glob_pattern in _CAB_GLOB_PATTERNS:
-        for yml_path in sorted(_CULTCARGO_DIR.glob(glob_pattern)):
-            try:
-                file_conf, _ = configuratt.load(yml_path, use_cache=False, use_sources=[merged])
-                merged = OmegaConf.merge(merged, file_conf)
-            except Exception:
-                pass
-    return merged
+# stimela's own detail levels, lowest first. `stimela doc` shows Required and
+# Optional by default and needs -I/-O/-A to go further; boepie takes the same
+# default, because Implicit and Obscure parameters are numerous, rarely what
+# an agent is looking for, and paid for on every call.
+type DetailLevel = Literal["required", "optional", "implicit", "obscure", "hidden"]
 
+_DETAIL_LEVELS: dict[str, ParameterCategory] = {
+    "required": ParameterCategory.Required,
+    "optional": ParameterCategory.Optional,
+    "implicit": ParameterCategory.Implicit,
+    "obscure": ParameterCategory.Obscure,
+    "hidden": ParameterCategory.Hidden,
+}
 
-def list_cab_names() -> list[str]:
-    """Return the names of all available cabs from the merged cultcargo config."""
-    cultcargo_config = _load_cultcargo_config()
-    return sorted(cultcargo_config.get("cabs", {}).keys())
+_CATEGORY_NAMES: dict[ParameterCategory, str] = {
+    category: name for name, category in _DETAIL_LEVELS.items()
+}
 
-
-def list_cabs_with_info() -> list[dict[str, str]]:
-    """Return all cabs as a list of ``{cab, description}`` dicts, sorted by name."""
-    cultcargo_config = _load_cultcargo_config()
-    cabs = cultcargo_config.get("cabs", {})
-    return [
-        {"cab": name, "description": str(cabs[name].get("info") or "")}
-        for name in sorted(cabs.keys())
-    ]
+DEFAULT_DETAIL: DetailLevel = "optional"
 
 
 class CabParam(BaseModel):
+    """One cab or recipe parameter, reduced to what a recipe author needs."""
+
     dtype: str = ""
     info: str = ""
     required: bool = False
     default: Any = None
     choices: list[str] | None = None
     writable: bool = False
+    # The value an implicit parameter always takes, as written in the cab
+    # definition - often a substitution like `{current.prefix}-sources.txt`.
+    # Never settable by the caller, which is the point of surfacing it.
+    implicit: str | None = None
+    category: str = "optional"
 
 
 class CabSchema(BaseModel):
@@ -222,32 +149,6 @@ class CabSchema(BaseModel):
     info: str = ""
     inputs: dict[str, CabParam] = {}
     outputs: dict[str, CabParam] = {}
-
-    def to_json_ref(self) -> str:
-        """Minimal JSON reference: names and dtypes only, no descriptions.
-
-        Use this when an LLM already knows what the cab does and only needs
-        to confirm parameter names and types.
-        """
-        required_inputs = {
-            param_name: param.dtype
-            for param_name, param in self.inputs.items()
-            if param.required
-        }
-        optional_inputs = {
-            param_name: param.dtype
-            for param_name, param in self.inputs.items()
-            if not param.required
-        }
-        outputs = {param_name: param.dtype for param_name, param in self.outputs.items()}
-        payload: dict[str, Any] = {
-            "cab": self.name,
-            "info": self.info,
-            "required_inputs": required_inputs,
-            "optional_inputs": optional_inputs,
-            "outputs": outputs,
-        }
-        return json.dumps(payload, indent=2)
 
     def to_compact(self) -> str:
         """Compact, token-efficient representation for LLM consumption."""
@@ -282,137 +183,124 @@ def _fmt_param(param_name: str, param: CabParam) -> str:
         parts.append(f"default={param.default}")
     if param.choices:
         parts.append(f"choices={param.choices}")
+    if param.implicit is not None:
+        parts.append(f"implicit={param.implicit}")
     meta = f" ({', '.join(parts)})" if parts else ""
     info = f" - {param.info}" if param.info else ""
     return f"{param_name}{meta}{info}"
 
 
-def _extract_params(params_node: Any) -> dict[str, CabParam]:
-    if not params_node:
-        return {}
-    result: dict[str, CabParam] = {}
-    for param_name, param_node in params_node.items():
-        param_dict = OmegaConf.to_container(param_node, resolve=True, throw_on_missing=False) or {}
-        # Skip namespace containers (dict whose values are themselves dicts)
-        if param_dict and all(isinstance(value, dict) for value in param_dict.values()):
-            continue
-        raw_choices = param_dict.get("choices") or None
-        result[param_name] = CabParam(
-            dtype=str(param_dict.get("dtype") or ""),
-            info=str(param_dict.get("info") or ""),
-            required=bool(param_dict.get("required") or False),
-            default=param_dict.get("default"),
-            choices=[str(choice) for choice in raw_choices] if raw_choices else None,
-            writable=bool(param_dict.get("writable") or False),
-        )
-    return result
+def _project_param(param: Parameter) -> CabParam:
+    """Reduce a finalized scabha `Parameter` to a `CabParam`.
 
-
-def load_cab_schema(cab_name: str) -> CabSchema:
-    """Load and resolve a cab's schema from the merged cultcargo config.
-
-    Parameters
-    ----------
-    cab_name:
-        Name of the cab (e.g. "wsclean", "casa.bandpass").
+    `default` needs care: scabha marks "no default" with the `UNSET`
+    sentinel *class*, not `None`, so a naive read renders it into output as
+    the literal text `<class 'scabha.basetypes.UNSET'>`.
     """
-    cultcargo_config = _load_cultcargo_config()
-    available_cabs = cultcargo_config.get("cabs", {})
-    if cab_name not in available_cabs:
-        available_names = ", ".join(sorted(available_cabs.keys()))
-        raise ValueError(f"Unknown cab '{cab_name}'. Available: {available_names}")
-
-    cab_node = available_cabs[cab_name]
-    return CabSchema(
-        name=cab_name,
-        info=str(cab_node.get("info") or ""),
-        inputs=_extract_params(cab_node.get("inputs")),
-        outputs=_extract_params(cab_node.get("outputs")),
+    default = param.default
+    if isinstance(default, type) and issubclass(default, UNSET):
+        default = None
+    return CabParam(
+        dtype=str(param.dtype or ""),
+        info=str(param.info or ""),
+        required=bool(param.required),
+        default=default,
+        choices=[str(choice) for choice in param.choices] if param.choices else None,
+        writable=bool(param.writable),
+        implicit=str(param.implicit) if param.implicit is not None else None,
+        category=_CATEGORY_NAMES.get(param.get_category(), "optional"),
     )
 
 
-def _param_info_dict(param: CabParam) -> dict[str, Any]:
-    """Return only the set fields of a CabParam as a dict."""
-    info: dict[str, Any] = {"dtype": param.dtype}
-    if param.info:
-        info["info"] = param.info
-    if param.required:
-        info["required"] = True
-    if param.default is not None:
-        info["default"] = param.default
-    if param.choices:
-        info["choices"] = param.choices
-    if param.writable:
-        info["writable"] = True
-    return info
+def _project_params(
+    params: dict[str, Parameter], detail: DetailLevel
+) -> dict[str, CabParam]:
+    """Project a finalized parameter mapping, dropping anything above `detail`.
 
-
-def _lookup_cab_param(cab_name: str, section: str, param_name: str) -> CabParam:
-    if section not in ("inputs", "outputs"):
-        raise ValueError(f"Section must be 'inputs' or 'outputs', got '{section}'")
-    schema = load_cab_schema(cab_name)
-    params = schema.inputs if section == "inputs" else schema.outputs
-    if param_name not in params:
-        raise ValueError(
-            f"Parameter '{param_name}' not found in {cab_name}.{section}"
-        )
-    return params[param_name]
-
-
-def _parse_query_path(path: str) -> tuple[str, str, str]:
-    """Split a path like 'casa.bandpass.inputs.ms' into (cab, section, param).
-
-    Parses right-to-left so cab names containing dots (e.g. 'casa.bandpass')
-    are preserved.
+    Ordering is the schema's own, which follows the cab definition - a cab
+    author groups related parameters together, and that grouping is worth
+    more to a reader than an alphabetical sort would be.
     """
-    segments = path.split(".")
-    if len(segments) < 3:
-        raise ValueError(
-            f"Path '{path}' must have at least 3 segments: <cab>.<section>.<param>"
-        )
-    param_name = segments[-1]
-    section = segments[-2]
-    cab_name = ".".join(segments[:-2])
-    return cab_name, section, param_name
+    ceiling = _DETAIL_LEVELS[detail]
+    projected: dict[str, CabParam] = {}
+    for name, param in params.items():
+        if param.get_category() > ceiling:
+            continue
+        projected[name] = _project_param(param)
+    return projected
 
 
-def resolve_query(query: str) -> Any:
-    """Resolve a single 'operation:path' query against cabs or stimela types.
+def list_cab_names(config: LoadedConfig | None = None) -> list[str]:
+    """Every cab name in the configured stimela sources, sorted."""
+    return (config or loaded_config()).cab_names()
 
-    Supported forms:
-      - 'type:<cab>.inputs.<param>'       -> dtype string
-      - 'type:<cab>.outputs.<param>'      -> dtype string
-      - 'info:<cab>.inputs.<param>'       -> dict of set fields
-      - 'info:<cab>.outputs.<param>'      -> dict of set fields
-      - 'type:stimela.types.<TypeName>'   -> base type string
-      - 'info:stimela.types.<TypeName>'   -> full type info dict
+
+def list_cabs_with_info(config: LoadedConfig | None = None) -> list[dict[str, str]]:
+    """Every cab as a ``{cab, description}`` dict, sorted by name.
+
+    Reads the raw config node rather than constructing each `Cab`, which is
+    both far cheaper and immune to a single malformed definition - the
+    catalogue has to stay listable even when one entry cannot be finalized.
     """
-    if ":" not in query:
-        raise ValueError(f"Query '{query}' must be in 'operation:path' form")
-    operation, path = query.split(":", 1)
-    operation = operation.strip()
-    path = path.strip()
+    return [
+        {"cab": definition.name, "description": definition.info}
+        for definition in (config or loaded_config()).cab_definitions()
+    ]
 
-    if operation not in ("type", "info"):
-        raise ValueError(f"Unknown operation '{operation}'. Use 'type' or 'info'")
 
-    if path.startswith("stimela.types."):
-        type_name = path[len("stimela.types."):]
-        if type_name not in _STIMELA_TYPES:
-            available = ", ".join(sorted(_STIMELA_TYPES.keys()))
-            raise ValueError(
-                f"Unknown stimela type '{type_name}'. Available: {available}"
-            )
-        stimela_type = _STIMELA_TYPES[type_name]
-        if operation == "type":
-            return stimela_type.base
-        return stimela_type.model_dump()
+def load_cab_schema(
+    cab_name: str,
+    detail: DetailLevel = DEFAULT_DETAIL,
+    config: LoadedConfig | None = None,
+) -> CabSchema:
+    """Load, finalize and project one cab's schema.
 
-    cab_name, section, param_name = _parse_query_path(path)
-    param = _lookup_cab_param(cab_name, section, param_name)
-    if operation == "type":
-        return param.dtype
-    return _param_info_dict(param)
+    Raises `ValueError` when no such cab exists, and `StimelaConfigError`
+    when the cab exists but stimela rejects its definition - two different
+    problems, and only the first is the caller's fault.
+    """
+    resolved = config or loaded_config()
+    if not resolved.has_cab(cab_name):
+        raise ValueError(
+            f"Unknown cab '{cab_name}'. Call list_cabs to see what is available."
+        )
+    cab = resolved.finalized_cab(cab_name)
+    return CabSchema(
+        name=cab_name,
+        info=str(cab.info or ""),
+        inputs=_project_params(cab.inputs, detail),
+        outputs=_project_params(cab.outputs, detail),
+    )
+
+
+def load_recipe_schema(
+    recipe_name: str,
+    detail: DetailLevel = DEFAULT_DETAIL,
+    config: LoadedConfig | None = None,
+) -> CabSchema:
+    """Load, finalize and project one recipe's schema.
+
+    A finalized recipe exposes the same `inputs`/`outputs` shape as a cab -
+    including each step parameter the recipe leaves unset, promoted to
+    `{step}.{param}` - so it projects through the same code.
+    """
+    resolved = config or loaded_config()
+    if recipe_name not in resolved.config.lib.recipes:
+        raise ValueError(
+            f"Unknown recipe '{recipe_name}'. Call list_recipes to see what is available."
+        )
+    recipe = resolved.finalized_recipe(recipe_name)
+    return CabSchema(
+        name=recipe_name,
+        info=str(recipe.info or ""),
+        inputs=_project_params(recipe.inputs, detail),
+        outputs=_project_params(recipe.outputs, detail),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Execution
+# ---------------------------------------------------------------------------
 
 
 def stimela_run(

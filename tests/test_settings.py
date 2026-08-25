@@ -354,3 +354,61 @@ def test_known_keys_covers_every_section_field() -> None:
 def test_field_for_rejects_an_unknown_key() -> None:
     with pytest.raises(KeyError):
         settings.field_for("nonsense.key")
+
+
+# ---------------------------------------------------------------------------
+# List-valued settings
+#
+# `pipeline.sources` is the first key that is not a scalar. TOML holds it as
+# an array, but a shell argument and an environment variable can only be one
+# string, so both of those layers split on commas before pydantic sees them.
+# ---------------------------------------------------------------------------
+
+
+def test_is_list_setting_distinguishes_lists_from_scalars() -> None:
+    assert settings.is_list_setting("pipeline.sources")
+    assert not settings.is_list_setting("sync.auto_sync")
+    assert not settings.is_list_setting("embedding.binding")
+
+
+def test_pipeline_sources_defaults_to_cultcargo() -> None:
+    assert settings.get("pipeline.sources") == ["cultcargo::"]
+
+
+def test_a_list_setting_splits_a_comma_separated_env_var(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BOEPIE_PIPELINE_SOURCES", "cultcargo::, otherlib.recipes::")
+
+    assert settings.load().pipeline.sources == ["cultcargo::", "otherlib.recipes::"]
+
+
+def test_a_list_setting_env_var_drops_empty_items(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("BOEPIE_PIPELINE_SOURCES", "cultcargo::,,")
+
+    assert settings.load().pipeline.sources == ["cultcargo::"]
+
+
+def test_parse_value_splits_a_list_setting() -> None:
+    parsed = settings.parse_value("pipeline.sources", "cultcargo::,otherlib::")
+
+    assert parsed == ["cultcargo::", "otherlib::"]
+
+
+def test_set_value_round_trips_a_list_setting(_isolated_config_dir: Path) -> None:
+    settings.set_value("pipeline.sources", ["cultcargo::", "otherlib::"])
+
+    assert settings.get("pipeline.sources") == ["cultcargo::", "otherlib::"]
+    raw = settings.config_path().read_text(encoding="utf-8")
+    assert "otherlib::" in raw
+
+
+def test_a_generated_config_file_renders_a_list_setting_as_an_array(
+    _isolated_config_dir: Path,
+) -> None:
+    settings.create()
+
+    raw = settings.config_path().read_text(encoding="utf-8")
+    assert 'sources = ["cultcargo::"]' in raw

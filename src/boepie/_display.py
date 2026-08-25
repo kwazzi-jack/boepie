@@ -398,22 +398,50 @@ def hint(coordinate: str, snippet: str) -> None:
     console.print(line, soft_wrap=True)
 
 
-def document_line(title: str, document_id: str, managed_by: str) -> Text:
-    """`corpus list`'s label: the title a person recognises, then the id that
-    `read_*` and `corpus remove` take, then who manages the document."""
-    line = Text()
-    line.append(title, style="boepie.title")
-    line.append(" (", style="muted")
-    line.append("id=", style="boepie.key")
-    line.append(document_id, style="boepie.identifier")
-    line.append(", ", style="muted")
-    line.append(*_managed_marker(managed_by))
-    line.append(")", style="muted")
-    return line
+def _document_handle(document_id: str, managed_by: str) -> Text:
+    """The `(id=..., who)` trailer: what `read_*` and `corpus remove` take,
+    and who manages the document."""
+    handle = Text("(", style="muted")
+    handle.append("id=", style="boepie.key")
+    handle.append(document_id, style="boepie.identifier")
+    handle.append(", ", style="muted")
+    handle.append(*_managed_marker(managed_by))
+    handle.append(")", style="muted")
+    return handle
+
+
+def document_entry(title: str, document_id: str, managed_by: str) -> None:
+    """Print one `corpus list` entry, keeping its `(id=..., ...)` handle whole.
+
+    Paper titles routinely outrun a terminal, and rich wrapping the composed
+    line breaks wherever a space falls - which lands mid-handle and leaves
+    `boepie)` stranded on a line of its own. So the title is wrapped alone and
+    the handle is placed after it only if it fits, otherwise on the
+    continuation line, where it is still visibly part of this entry.
+    """
+    indent = "  "
+    handle = _document_handle(document_id, managed_by)
+    width = max(console.width - len(indent), 20)
+    wrapped = Text(title or document_id, style="boepie.title").wrap(console, width)
+
+    lines: list[Text] = [Text(line.plain) for line in wrapped] or [Text()]
+    for line, source in zip(lines, wrapped):
+        line.spans = list(source.spans)
+        line.style = source.style
+    if len(lines[-1]) + 1 + len(handle) <= width:
+        lines[-1].append(" ")
+        lines[-1].append_text(handle)
+    else:
+        lines.append(handle)
+
+    for position, line in enumerate(lines):
+        console.print(
+            line if position == 0 else Text(indent).append_text(line), soft_wrap=True
+        )
 
 
 def document_leaf(title: str, document_id: str, managed_by: str) -> Text:
-    """`corpus tree`'s leaf label. Same facts as `document_line`, laid out for
+    """`corpus tree`'s leaf label. Same facts as `document_entry`, laid out for
     a tree: boepie-managed is the norm here, so only `yours` is called out."""
     line = Text()
     line.append(title, style="boepie.title")
@@ -428,8 +456,14 @@ def group_leaf(name: str) -> Text:
     return Text(f"{name}/", style="heading")
 
 
-def tree_root(collection: str, location: object) -> Text:
-    """`corpus tree`'s root label: the collection and where it lives on disk."""
+def collection_root(collection: str, location: object) -> Text:
+    """A collection and where it lives on disk.
+
+    Shared by `corpus tree`'s root label and `corpus status`'s per-collection
+    heading, so the two commands name a collection the same way. Callers
+    print it with `soft_wrap`: the path is one token, and rich's word wrap
+    would otherwise break a long one mid-token into something uncopyable.
+    """
     root = Text()
     root.append(collection, style="boepie.collection")
     root.append(f" {location}", style="boepie.path")

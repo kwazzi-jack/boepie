@@ -24,23 +24,30 @@ from boepie.pipeline.measurement_set import (
     get_ms_info,
     get_ms_summary,
 )
-from boepie.pipeline.recipe import run_recipe, validate_recipe
+from boepie.pipeline.recipe import (
+    get_recipe_docs,
+    list_recipes,
+    run_recipe,
+    validate_recipe,
+)
 
 mcp = FastMCP(
     "boepie",
     instructions=(
         "You are an expert assistant for stimela, a radio astronomy pipeline "
         "framework that chains containerised tools (called 'cabs') via YAML "
-        "recipe files. Cabs come from the cult-cargo package and include "
-        "tools like wsclean, quartical, pfb.*, casa.*, breizorro, and many "
-        "others covering imaging, calibration, flagging, and source finding.\n"
+        "recipe files. Cabs come from the stimela libraries the user has "
+        "configured - cult-cargo by default - and include tools like "
+        "wsclean, quartical, pfb.*, casa.*, breizorro, and many others "
+        "covering imaging, calibration, flagging, and source finding.\n"
         "\n"
         "## What boepie provides\n"
         "boepie exposes MCP tools for the full pipeline lifecycle: discover "
-        "cabs, inspect their parameters, validate recipes, execute them, and "
-        "inspect the MeasurementSets those recipes operate on. The tools read "
-        "the same resolved cultcargo config that stimela uses at runtime, so "
-        "results are always in sync with the installed version.\n"
+        "cabs, inspect their parameters, find and read existing recipes, "
+        "validate recipes, execute them, and inspect the MeasurementSets "
+        "those recipes operate on. The tools read the same resolved config "
+        "stimela itself loads, so results are always in sync with the "
+        "installed versions.\n"
         "\n"
         "## Escalation ladder\n"
         "Route each question through the cheapest layer that can answer it, "
@@ -48,8 +55,9 @@ mcp = FastMCP(
         "hits come back ordered most-relevant first:\n"
         "1. Parameter facts (names, types, defaults, choices) -> the cab "
         "tools (`list_cabs`, `get_cab_schema`, `get_cab_docs`, "
-        "`get_cab_params`). These are authoritative and live: never guess "
-        "a parameter.\n"
+        "`get_cab_params`) and, for a whole pipeline's parameters, "
+        "`list_recipes` / `get_recipe_docs`. These are authoritative and "
+        "live: never guess a parameter.\n"
         "2. Pipeline strategy / recipe-language concepts (\"how do I "
         "structure this pipeline\", \"what does this recipe-language "
         "feature mean\") -> check whether a `.boepie/` knowledge bundle "
@@ -73,14 +81,20 @@ mcp = FastMCP(
         "`list_corpus`. Pass `detail='documents'` to get read handles.\n"
         "\n"
         "## Critical rule: use these tools, do not improvise\n"
-        "Do NOT run 'stimela' via a shell. Do NOT read cultcargo YAML files "
-        "directly. Do NOT open MeasurementSets with casacore yourself. Do "
-        "NOT guess parameter names, types, or defaults. Every interaction "
-        "with stimela, cultcargo, and MeasurementSets must go through the "
-        "tools below. This is the only way to stay consistent with the "
-        "user's installed versions and avoid hallucinated parameters.\n"
+        "Do NOT run 'stimela' via a shell. Do NOT read cab YAML files out of "
+        "an installed library directly - `get_cab_docs` already resolves the "
+        "inheritance and nesting those files express. Do NOT open "
+        "MeasurementSets with casacore yourself. Do NOT guess parameter "
+        "names, types, or defaults. Every interaction with stimela, its cab "
+        "libraries, and MeasurementSets must go through the tools below. "
+        "This is the only way to stay consistent with the user's installed "
+        "versions and avoid hallucinated parameters.\n"
         "\n"
         "## Workflow for building a recipe\n"
+        "0. Check for prior art: `list_recipes` shows the recipes the "
+        "configured libraries define, and `list_recipes(recipe_file=...)` "
+        "adds the ones in a file the user is working on. Adapting an "
+        "existing recipe beats writing one from scratch.\n"
         "1. Discover: call `list_cabs` (optionally with an fnmatch pattern "
         "like `*clean*`, `casa.*`, `pfb.???`, or `[wq]*`) to find tools that "
         "fit the user's task.\n"
@@ -118,7 +132,19 @@ mcp = FastMCP(
         "its dtype. Pass `section='inputs'` or `'outputs'` to narrow output.\n"
         "- `get_cab_docs`: richer option with descriptions, defaults, and "
         "choices. Pass `params=[...]` to restrict the output to a subset "
-        "when you only care about a few parameters.\n"
+        "when you only care about a few parameters - big cabs run to well "
+        "over a hundred parameters.\n"
+        "- `detail` (on all three cab tools and `get_recipe_docs`): raises "
+        "or lowers the parameter-category ceiling. Default `optional` shows "
+        "everything a caller can set; `required` narrows to what must be "
+        "given; `implicit`, `obscure` and `hidden` add parameters the cab "
+        "normally fills in itself. Stay on the default unless a parameter "
+        "you expected is missing.\n"
+        "- `list_recipes`: recipes from the configured libraries, plus "
+        "those in `recipe_file` if given. The `origin` column says which.\n"
+        "- `get_recipe_docs`: a recipe's inputs, outputs and ordered steps. "
+        "Pass `raw=True` for the YAML source itself when you need to see "
+        "how steps are wired together rather than what they accept.\n"
         "- `get_cab_params`: most token-efficient when verifying or "
         "comparing many params across one or more cabs in a single call. "
         "Supports fnmatch patterns in each cab's `params` list.\n"
@@ -202,7 +228,9 @@ mcp.tool(read_notes)
 
 mcp.tool(list_corpus)
 
-# -- Pipeline tools --
+# -- Recipe tools --
+mcp.tool(list_recipes)
+mcp.tool(get_recipe_docs)
 mcp.tool(validate_recipe)
 mcp.tool(run_recipe)
 
