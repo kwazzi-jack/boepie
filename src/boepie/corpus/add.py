@@ -42,6 +42,7 @@ from boepie.corpus.layout import (
     title_needs_dot_stripped,
     unique_document_name,
 )
+from boepie.corpus.inputs import resolve_inputs
 from boepie.corpus.schema import KEY_FIELDS, Source, literature_blocks
 
 # `skipped` is not a soft failure: it is boepie declining to take something it
@@ -235,6 +236,7 @@ def add_notes(
     block. They are addressed by `id` and reconciled against nothing, which is
     why the old collection-wide `slug` is gone.
     """
+    identifiers = [resolved.identifier for resolved in resolve_inputs(identifiers)]
     state = _CorpusState.load(collection_dir, "notes")
     outcomes: list[AddOutcome] = []
 
@@ -393,6 +395,7 @@ def add_literature(
         resolve_doi_to_arxiv,
     )
 
+    identifiers = [resolved.identifier for resolved in resolve_inputs(identifiers)]
     state = _CorpusState.load(collection_dir, "literature")
     outcomes: list[AddOutcome] = []
 
@@ -624,6 +627,7 @@ def add_docs(
     from boepie.docs.manifest import DocsProject
     from boepie.corpus.intake import title_from_markdown
 
+    identifiers = [resolved.identifier for resolved in resolve_inputs(identifiers)]
     state = _CorpusState.load(collection_dir, "docs")
     outcomes: list[AddOutcome] = []
 

@@ -12,6 +12,7 @@ import os
 import shutil
 import tarfile
 import textwrap
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
@@ -72,6 +73,7 @@ from boepie.corpus.add import (
     add_notes,
 )
 from boepie.corpus.document import move_leaf_document, read_document
+from boepie.corpus.inputs import InputError
 from boepie.corpus.layout import (
     full_title_filename,
     lookup_path,
@@ -779,6 +781,20 @@ def _build_add_options(**overrides) -> AddOptions:
     )
 
 
+def _add_and_report(collection: str, adder: Callable[[], list[AddOutcome]]) -> None:
+    """Run one `corpus add` and report it.
+
+    `InputError` is raised rather than collected as an outcome (an argument
+    naming nothing cannot be carried out at all), so it is caught here and
+    given click's own error wording instead of a traceback.
+    """
+    try:
+        outcomes = adder()
+    except InputError as error:
+        raise CliError(str(error)) from error
+    _report_add(collection, outcomes)
+
+
 def _report_add(collection: str, outcomes: list[AddOutcome]) -> None:
     """One line per identifier, then a single summary and next step.
 
@@ -875,7 +891,9 @@ def corpus_add_literature(
     options = _build_add_options(
         title=title, group=group, keep_original=keep_original, citekey=citekey
     )
-    _report_add("literature", add_literature(LITERATURE_DIR, identifiers, options))
+    _add_and_report(
+        "literature", lambda: add_literature(LITERATURE_DIR, identifiers, options)
+    )
 
 
 @corpus_add.command("docs")
@@ -904,7 +922,7 @@ def corpus_add_docs(
     options = _build_add_options(
         title=title, group=group, keep_original=keep_original, project=project
     )
-    _report_add("docs", add_docs(DOCS_DIR, identifiers, options))
+    _add_and_report("docs", lambda: add_docs(DOCS_DIR, identifiers, options))
 
 
 @corpus_add.command("notes")
@@ -924,7 +942,7 @@ def corpus_add_notes(
     project's `.boepie/` bundle.
     """
     options = _build_add_options(title=title, group=group, keep_original=keep_original)
-    _report_add("notes", add_notes(NOTES_DIR, identifiers, options))
+    _add_and_report("notes", lambda: add_notes(NOTES_DIR, identifiers, options))
 
 
 @corpus.command("remove")

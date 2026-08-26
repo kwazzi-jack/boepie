@@ -981,3 +981,36 @@ def test_corpus_add_still_fails_the_batch_on_a_real_failure(
     result = runner.invoke(cli.cli, ["corpus", "add", "notes", "anything"])
 
     assert result.exit_code == 1, result.output
+
+
+# The crossing test for input resolution: `InputError` is raised, not collected
+# as an outcome, so without the CLI catching it a mistyped pattern would reach
+# the user as a traceback rather than a message.
+def test_corpus_add_reports_an_unmatched_pattern_as_a_clean_error(
+    runner: CliRunner, tmp_corpus_dirs: dict[str, Path], tmp_path: Path
+) -> None:
+    (tmp_path / "code").mkdir()
+
+    result = runner.invoke(
+        cli.cli, ["corpus", "add", "notes", str(tmp_path / "code" / "*.xyz")]
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "matched no files" in _plain(result.output)
+    assert result.exception is None or isinstance(result.exception, SystemExit)
+
+
+def test_corpus_add_notes_expands_a_pattern_the_shell_did_not(
+    runner: CliRunner, tmp_corpus_dirs: dict[str, Path], tmp_path: Path
+) -> None:
+    """A quoted pattern, or any pattern under a shell that does not expand
+    arguments, arrives as one literal string and must still name its files."""
+    source = tmp_path / "code"
+    source.mkdir()
+    (source / "a.md").write_text("# A\n\nbody\n", encoding="utf-8")
+    (source / "b.md").write_text("# B\n\nbody\n", encoding="utf-8")
+
+    result = runner.invoke(cli.cli, ["corpus", "add", "notes", str(source / "*.md")])
+
+    assert result.exit_code == 0, result.output
+    assert len(list(tmp_corpus_dirs["notes"].glob("*.md"))) == 2

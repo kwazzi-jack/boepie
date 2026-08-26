@@ -8,10 +8,11 @@ paths for literature; anything else for future loaders).
 
 from __future__ import annotations
 
-import functools
 import re
 
 from typing import Any, Callable, Literal
+
+from boepie._glob import globstar_regex
 
 from pydantic import BaseModel, Field
 
@@ -154,7 +155,7 @@ def _glob_match(actual: str, pattern: str) -> bool:
       and not its contents would be useless for filtering, so `*` and `**`
       end up equivalent here, and that is deliberate.
     """
-    regex = _globstar_regex(pattern.rstrip("/"))
+    regex = globstar_regex(pattern.rstrip("/"))
     if regex.fullmatch(actual):
         return True
     segments = actual.split("/")
@@ -162,35 +163,6 @@ def _glob_match(actual: str, pattern: str) -> bool:
         regex.fullmatch("/".join(segments[:depth]))
         for depth in range(1, len(segments))
     )
-
-
-@functools.lru_cache(maxsize=256)
-def _globstar_regex(pattern: str) -> re.Pattern[str]:
-    """`pattern` as a regex where `**` crosses separators and `*` does not.
-
-    `**/` collapses to an optional run of leading segments, so `**/gains`
-    matches a top-level `gains` as well as a nested one - the .gitignore
-    reading, and the one anybody typing it expects.
-    """
-    parts: list[str] = []
-    index = 0
-    while index < len(pattern):
-        if pattern.startswith("**/", index):
-            parts.append("(?:.*/)?")
-            index += 3
-        elif pattern.startswith("**", index):
-            parts.append(".*")
-            index += 2
-        elif pattern[index] == "*":
-            parts.append("[^/]*")
-            index += 1
-        elif pattern[index] == "?":
-            parts.append("[^/]")
-            index += 1
-        else:
-            parts.append(re.escape(pattern[index]))
-            index += 1
-    return re.compile("".join(parts))
 
 
 def _coerce_pair(actual: Any, value: Any) -> tuple[Any, Any]:

@@ -678,11 +678,11 @@ def test_glob_filter_selects_a_group_and_its_descendants():
 def test_glob_filter_stops_a_single_star_at_a_separator():
     """`fnmatch`'s `*` crosses `/`, which would make `*` and `**` synonyms and
     leave no way to pin a pattern to one level."""
-    from boepie.rag.models import _globstar_regex
+    from boepie._glob import globstar_regex
 
-    assert _globstar_regex("*").fullmatch("wsclean")
-    assert not _globstar_regex("*").fullmatch("wsclean/deep")
-    assert _globstar_regex("**").fullmatch("wsclean/deep")
+    assert globstar_regex("*").fullmatch("wsclean")
+    assert not globstar_regex("*").fullmatch("wsclean/deep")
+    assert globstar_regex("**").fullmatch("wsclean/deep")
 
 
 def test_filter_on_a_missing_field_excludes_rather_than_raises():
