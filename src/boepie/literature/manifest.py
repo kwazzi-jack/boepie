@@ -30,6 +30,12 @@ _CITEKEY_STOPWORDS = frozenset({
     "a", "an", "the", "of", "for", "and", "with", "in", "on", "to", "using", "at",
 })
 
+# Stands in for the surname when there is no author to take one from - a local
+# PDF carries no bibliography, so the key is title-derived and reads
+# `paperRadioInterferometry`. Deliberately a real word rather than a marker
+# like `unknown`: it ends up in citations.
+_CITEKEY_NO_AUTHOR = "paper"
+
 
 @dataclass(frozen=True)
 class ArxivPaper:
@@ -80,8 +86,12 @@ def derive_citekey(authors: str, year: str, title: str) -> str:
     else:
         # "First M. Last" - what arXiv's own Atom API returns, and what
         # `lookup_arxiv_metadata` (the real caller for `corpus add literature`) hands in.
-        surname = first_author.split()[-1].strip()
-    surname = re.sub(r"[^A-Za-z]", "", surname) or "paper"
+        # A bare local file has no bibliography at all, so `authors` is empty and
+        # there is no name to take a surname from; `_CITEKEY_NO_AUTHOR` below is
+        # what that case falls back to.
+        parts = first_author.split()
+        surname = parts[-1].strip() if parts else ""
+    surname = re.sub(r"[^A-Za-z]", "", surname) or _CITEKEY_NO_AUTHOR
     surname_part = surname[:1].lower() + surname[1:]
 
     words = [word for word in re.findall(r"[A-Za-z]+", title) if word.lower() not in _CITEKEY_STOPWORDS]
@@ -101,4 +111,12 @@ def unique_citekey(base_citekey: str, existing_citekeys: set[str]) -> str:
         candidate = f"{base_citekey}{letter}"
         if candidate not in existing_citekeys:
             return candidate
-    raise ValueError(f"could not disambiguate citekey '{base_citekey}'")
+    # Past `z` the Zotero convention has nothing more to say, and raising here
+    # would abort a whole batch over one document. Title-derived keys (a folder
+    # of PDFs with no bibliography) collide far more readily than the
+    # author-and-year keys this was written for, so the 27th is numbered rather
+    # than fatal.
+    suffix = 27
+    while f"{base_citekey}{suffix}" in existing_citekeys:
+        suffix += 1
+    return f"{base_citekey}{suffix}"

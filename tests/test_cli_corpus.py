@@ -941,3 +941,43 @@ def test_collection_list_rejects_an_empty_selection() -> None:
     param_type = cli.CollectionList(("literature", "docs", "notes"))
     with pytest.raises(click.BadParameter):
         param_type.convert(",", None, None)
+
+
+# The exit code is the point of the `skipped` status, not the wording: a folder
+# walk routinely turns up a file boepie declines to take (an image among the
+# PDFs, a format whose converter is not installed), and that must not fail the
+# command the way a genuine failure does. Nothing else in `_report_add`
+# distinguishes the two, so this is the crossing test for it.
+def test_corpus_add_reports_a_skip_without_failing_the_batch(
+    runner: CliRunner, tmp_corpus_dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from boepie.corpus.add import AddOutcome
+
+    def fake_add_notes(collection_dir, identifiers, options):
+        return [
+            AddOutcome(identifier="kept.md", status="added", title="Kept", document_id="aB3dE9fGhI"),
+            AddOutcome(identifier="logo.png", status="skipped", detail="unsupported file type"),
+        ]
+
+    monkeypatch.setattr(cli, "add_notes", fake_add_notes)
+
+    result = runner.invoke(cli.cli, ["corpus", "add", "notes", "anything"])
+
+    assert result.exit_code == 0, result.output
+    assert "skipped" in _plain(result.output)
+    assert "1 skipped" in _plain(result.output)
+
+
+def test_corpus_add_still_fails_the_batch_on_a_real_failure(
+    runner: CliRunner, tmp_corpus_dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from boepie.corpus.add import AddOutcome
+
+    def fake_add_notes(collection_dir, identifiers, options):
+        return [AddOutcome(identifier="gone.md", status="failed", detail="does not exist")]
+
+    monkeypatch.setattr(cli, "add_notes", fake_add_notes)
+
+    result = runner.invoke(cli.cli, ["corpus", "add", "notes", "anything"])
+
+    assert result.exit_code == 1, result.output

@@ -44,7 +44,11 @@ from boepie.corpus.layout import (
 )
 from boepie.corpus.schema import KEY_FIELDS, Source, literature_blocks
 
-AddStatus = Literal["added", "duplicate", "failed"]
+# `skipped` is not a soft failure: it is boepie declining to take something it
+# was pointed at, which a folder walk makes routine (an image among the PDFs,
+# a format whose converter is not installed). It must never set the exit code,
+# or a directory containing one file boepie cannot read would fail the command.
+type AddStatus = Literal["added", "duplicate", "failed", "skipped"]
 
 
 @dataclass(frozen=True)
@@ -457,8 +461,13 @@ def add_literature(
             )
             continue
 
+        # A real file on disk always wins, exactly as it does for a DOI below.
+        # `normalize_arxiv_id` searches rather than matches, so any filename
+        # carrying a date-shaped run of digits ('notes-2409.19750.md') reads as
+        # an arXiv id; without this guard the local file was ignored in silence
+        # and a stranger's paper of that number fetched in its place.
         arxiv_id = normalize_arxiv_id(identifier)
-        if arxiv_id is not None:
+        if arxiv_id is not None and not Path(identifier).expanduser().is_file():
             outcomes.append(
                 _add_arxiv_paper(collection_dir, state, arxiv_id, identifier, options)
             )

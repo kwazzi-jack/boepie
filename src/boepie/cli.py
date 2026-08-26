@@ -788,6 +788,7 @@ def _report_add(collection: str, outcomes: list[AddOutcome]) -> None:
     added = [outcome for outcome in outcomes if outcome.status == "added"]
     duplicates = [outcome for outcome in outcomes if outcome.status == "duplicate"]
     failures = [outcome for outcome in outcomes if outcome.status == "failed"]
+    skipped = [outcome for outcome in outcomes if outcome.status == "skipped"]
 
     for outcome in outcomes:
         if outcome.status == "added":
@@ -811,13 +812,20 @@ def _report_add(collection: str, outcomes: list[AddOutcome]) -> None:
         elif outcome.status == "duplicate":
             display.warning(
                 f"{outcome.identifier} - {outcome.detail} (id={outcome.document_id})",
-                lead="skipped",
+                lead="duplicate",
             )
+        elif outcome.status == "skipped":
+            # Quieter than a duplicate: nothing is wrong, and a folder walk can
+            # produce a great many of these at once.
+            display.muted(f"{outcome.identifier} - {outcome.detail}", lead="skipped")
         else:
             display.error(f"{outcome.identifier} - {outcome.detail}", lead="failed")
 
+    # Skips are counted only when there are any - on a hand-typed batch the
+    # count is always zero and would just be one more number to read past.
+    tail = f", {len(skipped)} skipped" if skipped else ""
     display.heading(
-        f"{len(duplicates)} already present, {len(failures)} failed.",
+        f"{len(duplicates)} already present, {len(failures)} failed{tail}.",
         lead=f"{len(added)} added,",
         indent="\n",
     )
@@ -826,6 +834,8 @@ def _report_add(collection: str, outcomes: list[AddOutcome]) -> None:
             f"boepie index build --collection {collection}",
             note="(once you have finished adding)",
         )
+    # Failures only. A skip is a deliberate decision not to take something, so
+    # a folder holding one unreadable file still exits 0.
     if failures:
         raise SystemExit(1)
 
