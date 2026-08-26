@@ -388,8 +388,8 @@ def add_literature(
     paper rather than as a missing file.
     """
     from boepie.literature.identifiers import (
+        arxiv_id_if_reference,
         looks_like_bibtex,
-        normalize_arxiv_id,
         normalize_doi,
         parse_bibtex_file,
         resolve_doi_to_arxiv,
@@ -464,12 +464,12 @@ def add_literature(
             )
             continue
 
-        # A real file on disk always wins, exactly as it does for a DOI below.
-        # `normalize_arxiv_id` searches rather than matches, so any filename
-        # carrying a date-shaped run of digits ('notes-2409.19750.md') reads as
-        # an arXiv id; without this guard the local file was ignored in silence
-        # and a stranger's paper of that number fetched in its place.
-        arxiv_id = normalize_arxiv_id(identifier)
+        # Only when the whole argument is an arXiv reference, and only when no
+        # such file exists. A filename carrying a date-shaped run of digits
+        # ('notes-2409.19750.md') otherwise reads as an arXiv id, and both a
+        # real file and a mistyped one were answered by silently fetching a
+        # stranger's paper of that number.
+        arxiv_id = arxiv_id_if_reference(identifier)
         if arxiv_id is not None and not Path(identifier).expanduser().is_file():
             outcomes.append(
                 _add_arxiv_paper(collection_dir, state, arxiv_id, identifier, options)

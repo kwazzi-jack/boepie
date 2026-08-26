@@ -79,6 +79,41 @@ def normalize_arxiv_id(identifier: str) -> str | None:
     return None
 
 
+def arxiv_id_if_reference(identifier: str) -> str | None:
+    """`identifier` as an arXiv id, but only when the whole of it is one.
+
+    `normalize_arxiv_id` searches, which is right when reading an id out of a
+    paper's own text but wrong for something a user typed as an argument: any
+    filename carrying a date-shaped run of digits ('my-paper-2409.19750.md')
+    contains an arXiv id by that reading, and answering a mistyped path by
+    silently fetching an unrelated paper of that number is the worst failure
+    this module can produce.
+
+    A URL is still matched loosely, because `normalize_arxiv_id` already
+    requires it to be an arXiv-family host. Everything else must be the bare
+    id, optionally `arXiv:`-prefixed, version-suffixed, or named `.pdf` -
+    exactly the spellings arXiv itself hands out.
+    """
+    candidate = identifier.strip()
+    if not candidate:
+        return None
+    if "://" in candidate:
+        return normalize_arxiv_id(candidate)
+
+    for prefix in ("arxiv:", "arXiv:"):
+        if candidate.lower().startswith(prefix.lower()):
+            candidate = candidate[len(prefix) :].strip()
+            break
+    if candidate.lower().endswith(".pdf"):
+        candidate = candidate[: -len(".pdf")]
+
+    for pattern in (_MODERN_ARXIV, _LEGACY_ARXIV):
+        match = pattern.fullmatch(candidate)
+        if match is not None:
+            return match.group(1)
+    return None
+
+
 def normalize_doi(identifier: str) -> str | None:
     """Extract a bare DOI from `10.x/y`, `doi:10.x/y`, or a doi.org URL."""
     candidate = identifier.strip()

@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 
 from boepie.literature.identifiers import (
+    arxiv_id_if_reference,
     looks_like_bibtex,
     normalize_arxiv_id,
     normalize_doi,
@@ -139,3 +140,38 @@ def test_parse_bibtex_skips_entries_with_no_title():
     entries = parse_bibtex("@misc{nothing,\n  author = {Nobody},\n}\n")
 
     assert entries == []
+
+
+# The distinction this pair pins: `normalize_arxiv_id` searches, because it has
+# to find an id printed inside a paper's text, while an argument a user typed
+# must be an arXiv reference in its entirety. Reading a filename's date-shaped
+# digits as an id answered both a real file and a mistyped path by fetching an
+# unrelated paper of that number.
+@pytest.mark.parametrize(
+    "spelling",
+    [
+        "2409.19750",
+        "2409.19750v1",
+        "arXiv:2409.19750",
+        "2409.19750v1.pdf",
+        "https://arxiv.org/abs/2409.19750v1",
+    ],
+)
+def test_a_whole_argument_that_is_an_arxiv_reference_resolves(spelling: str) -> None:
+    assert arxiv_id_if_reference(spelling) == "2409.19750"
+
+
+@pytest.mark.parametrize(
+    "filename",
+    ["my-paper-2409.19750.md", "2409.19750.md", "notes-2409.19750.txt"],
+)
+def test_a_filename_merely_containing_an_arxiv_id_is_not_a_reference(
+    filename: str,
+) -> None:
+    assert arxiv_id_if_reference(filename) is None
+    # Still found by the searching form, which is what reads it out of a PDF.
+    assert normalize_arxiv_id(filename) == "2409.19750"
+
+
+def test_the_legacy_form_survives_the_stricter_reading() -> None:
+    assert arxiv_id_if_reference("astro-ph/0601234") == "astro-ph/0601234"
