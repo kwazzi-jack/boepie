@@ -36,6 +36,7 @@ from boepie import __version__, settings
 from boepie import _display as display
 from boepie._display import CliError, console
 from boepie.config import (
+    CORPUS_EXTRA_FILE_TYPES,
     CORPUS_KEEP_ORIGINAL,
     CORPUS_WARN_ON_DOTFILE_TITLE,
     DEFAULT_MODE,
@@ -774,6 +775,7 @@ def _build_add_options(**overrides) -> AddOptions:
     keep_original = overrides.pop("keep_original", None)
     return AddOptions(
         keep_original=CORPUS_KEEP_ORIGINAL if keep_original is None else keep_original,
+        extra_file_types=tuple(CORPUS_EXTRA_FILE_TYPES),
         mineru_device_mode=MINERU_DEVICE_MODE,
         mineru_backend=MINERU_BACKEND,
         mineru_model_source=MINERU_MODEL_SOURCE,

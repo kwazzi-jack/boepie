@@ -159,6 +159,17 @@ class CorpusSettings(BaseModel):
             "filename starting with '.' before the leading dot is stripped."
         ),
     )
+    extra_file_types: list[str] = Field(
+        default=[],
+        description=(
+            "Extra file extensions a folder walk should accept, on top of "
+            "the formats boepie already converts (e.g. '.ipynb'). Added to "
+            "that list, not a replacement for it. Anything not accepted is "
+            "skipped and counted, never read as text - the encoding fallback "
+            "would otherwise turn a binary into a document of mojibake."
+        ),
+    )
+
     keep_original: bool = Field(
         False,
         description=(

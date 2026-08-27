@@ -1014,3 +1014,44 @@ def test_corpus_add_notes_expands_a_pattern_the_shell_did_not(
 
     assert result.exit_code == 0, result.output
     assert len(list(tmp_corpus_dirs["notes"].glob("*.md"))) == 2
+
+
+# The crossing test for the folder walk: grouping, the accept-list and the
+# exit code all meet here, and none of them is exercised by the unit tests in
+# tests/test_corpus_inputs.py, which stop before anything is written.
+def test_corpus_add_notes_walks_a_folder_into_mirrored_groups(
+    runner: CliRunner, tmp_corpus_dirs: dict[str, Path], tmp_path: Path
+) -> None:
+    root = tmp_path / "code"
+    (root / "gains").mkdir(parents=True)
+    (root / "README.md").write_text("# Top\n", encoding="utf-8")
+    (root / "gains" / "README.md").write_text("# Gains\n", encoding="utf-8")
+    (root / "gains" / "lib.so").write_bytes(bytes(range(256)))
+
+    result = runner.invoke(cli.cli, ["corpus", "add", "notes", str(root)])
+
+    assert result.exit_code == 0, result.output
+    notes = tmp_corpus_dirs["notes"]
+    assert (notes / "Top.md").is_file()
+    assert (notes / "gains" / "Gains.md").is_file()
+    assert "1 skipped" in _plain(result.output)
+    assert not list(notes.rglob("*.so"))
+
+
+def test_corpus_add_group_prefixes_a_walked_folder_rather_than_flattening_it(
+    runner: CliRunner, tmp_corpus_dirs: dict[str, Path], tmp_path: Path
+) -> None:
+    """Flattening would put both READMEs in one group and undo the mirroring."""
+    root = tmp_path / "code"
+    (root / "gains").mkdir(parents=True)
+    (root / "b.md").write_text("# B\n", encoding="utf-8")
+    (root / "gains" / "a.md").write_text("# A\n", encoding="utf-8")
+
+    result = runner.invoke(
+        cli.cli, ["corpus", "add", "notes", str(root), "--group", "quartical"]
+    )
+
+    assert result.exit_code == 0, result.output
+    notes = tmp_corpus_dirs["notes"]
+    assert (notes / "quartical" / "B.md").is_file()
+    assert (notes / "quartical" / "gains" / "A.md").is_file()

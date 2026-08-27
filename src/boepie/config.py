@@ -212,6 +212,12 @@ CORPUS_WARN_ON_DOTFILE_TITLE: bool = _SETTINGS.corpus.warn_on_dotfile_title
 # way, which answers "is this the same document" without the bytes.
 CORPUS_KEEP_ORIGINAL: bool = _SETTINGS.corpus.keep_original
 
+# Extra suffixes a folder walk accepts, on top of the formats boepie already
+# converts (`corpus.intake.SUPPORTED_SUFFIXES`). Additive: a walk is an
+# accept-list, because `detect_format`'s catch-all plus a latin-1 encoding
+# fallback would otherwise turn any binary it met into a document.
+CORPUS_EXTRA_FILE_TYPES: list[str] = list(_SETTINGS.corpus.extra_file_types)
+
 # ---------------------------------------------------------------------------
 # MinerU: PDF/image/DOCX/PPTX/XLSX conversion (used when LITERATURE_PREFER_PDF
 # is set, and by `corpus add notes` for any identifier that resolves to one

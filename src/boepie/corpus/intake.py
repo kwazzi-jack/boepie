@@ -25,6 +25,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
@@ -53,6 +54,38 @@ _CODE_SUFFIXES = frozenset({
     ".xml", ".csv", ".tsv", ".tex", ".bib", ".lua", ".pl", ".php", ".swift",
     ".scala", ".hs", ".ex", ".exs", ".vim", ".dockerfile", ".makefile",
 })
+
+# Every suffix boepie has a converter for. This is the accept-list a folder
+# walk works from, and it exists because `detect_format` below deliberately
+# does not: asked about an unknown suffix it answers "code", which is right
+# when a user named one file explicitly and vouched for it, and catastrophic
+# when walking a directory. `read_text_file`'s encoding ladder ends in latin-1
+# and so never fails, meaning a naive walk would ingest an ELF binary, a .pyc
+# or a git pack file as a fenced block of mojibake, silently, and index it.
+#
+# Derived from the sets above rather than restated, so a format added to one
+# of them is walkable without a second edit.
+SUPPORTED_SUFFIXES: frozenset[str] = frozenset(
+    _MARKDOWN_SUFFIXES | _TEXT_SUFFIXES | _HTML_SUFFIXES | _CODE_SUFFIXES
+) | frozenset(_MINERU_SUFFIXES)
+
+
+def is_supported_suffix(path: Path, extra: Sequence[str] = ()) -> bool:
+    """Whether a folder walk should pick `path` up.
+
+    `extra` is `corpus.extra_file_types`, added rather than substituted: the
+    common need is one more extension (a `.ipynb`, a house format), not a
+    replacement for the sixty boepie already knows.
+    """
+    suffix = path.suffix.lower()
+    if not suffix:
+        # No extension at all. A `Makefile` is real text, but so is every
+        # extensionless binary, and a walk cannot tell them apart by name.
+        return False
+    return suffix in SUPPORTED_SUFFIXES or suffix in {
+        item.lower() if item.startswith(".") else f".{item.lower()}" for item in extra
+    }
+
 
 # Tried in order when a text file is not valid UTF-8. Latin-1 never fails, so
 # it terminates the list and guarantees a text file is always readable rather

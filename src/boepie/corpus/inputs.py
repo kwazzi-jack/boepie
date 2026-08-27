@@ -28,11 +28,24 @@ Two rules worth stating out loud:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Sequence
 
 from boepie._glob import globstar_regex, looks_like_pattern
+from boepie.corpus.intake import is_supported_suffix
+
+# Directory names never worth walking into. Dot-prefixed names are skipped
+# separately and by rule; these are the ones that are neither hidden nor
+# interesting - build output, dependency trees, caches. Skipping them by name
+# is about speed, not safety: the accept-list already keeps their contents
+# out, but there is no reason to walk a `node_modules` to discard every file
+# in it.
+_SKIPPED_DIRECTORY_NAMES = frozenset({
+    "__pycache__", "node_modules", "dist", "build", "site-packages",
+    "venv", "env", "target", "vendor", "coverage", "htmlcov",
+})
 
 # Where one resolved file came from. Only `pattern` and `directory` are
 # expansions; `argument` is the identifier exactly as typed, which is the
@@ -54,10 +67,37 @@ class ResolvedInput:
     # The argument this came from, kept so a report can say which pattern
     # produced a file rather than only naming the file.
     from_argument: str = ""
+    # The walked directory's own subdirectory structure, mirrored onto corpus
+    # groups. Empty for anything that did not come from a directory. Relative
+    # to the directory named on the command line, not including it: walking
+    # `code/` files `code/gains/x.py` under `gains`, and `--group` supplies
+    # any prefix above that.
+    group: str = ""
 
     def __post_init__(self) -> None:
         if not self.from_argument:
             object.__setattr__(self, "from_argument", self.identifier)
+
+
+@dataclass(frozen=True)
+class SkippedInput:
+    """A file a walk found and declined to take.
+
+    Kept rather than dropped so the count can be reported: a walk that
+    silently ignored half a directory would leave the user believing the
+    corpus holds something it does not.
+    """
+
+    identifier: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class ResolvedInputs:
+    """Everything one `corpus add` invocation will act on."""
+
+    items: list[ResolvedInput] = field(default_factory=list)
+    skipped: list[SkippedInput] = field(default_factory=list)
 
 
 class InputError(Exception):
@@ -120,19 +160,91 @@ def _leading_literal_segments(segments: Sequence[str]) -> list[str]:
     return literal[:-1] if len(literal) == len(segments) else literal
 
 
-def resolve_inputs(identifiers: Sequence[str]) -> list[ResolvedInput]:
+def _skip_directory(name: str) -> bool:
+    """Whether a walk should decline to descend into `name`."""
+    return name.startswith(".") or name in _SKIPPED_DIRECTORY_NAMES
+
+
+def _walk_directory(
+    root: Path, argument: str, extra_file_types: Sequence[str]
+) -> tuple[list[ResolvedInput], list[SkippedInput]]:
+    """Every file under `root` boepie can convert, with its group.
+
+    `os.walk` rather than `rglob` so a pruned directory is never descended
+    into at all. Symlinks are skipped, both files and directories: a link can
+    point outside the tree the user named, and `boepie corpus add notes code/`
+    should mean what is under `code/`, not wherever `code/vendor` aliases to.
+    """
+    items: list[ResolvedInput] = []
+    skipped: list[SkippedInput] = []
+
+    for current, directories, filenames in os.walk(root):
+        here = Path(current)
+        directories[:] = sorted(
+            name
+            for name in directories
+            if not _skip_directory(name) and not (here / name).is_symlink()
+        )
+        group = here.relative_to(root).as_posix()
+        group = "" if group == "." else group
+
+        for name in sorted(filenames):
+            path = here / name
+            if path.is_symlink():
+                skipped.append(SkippedInput(identifier=str(path), reason="symlink"))
+                continue
+            if not is_supported_suffix(path, extra_file_types):
+                skipped.append(
+                    SkippedInput(
+                        identifier=str(path),
+                        reason=f"unsupported file type '{path.suffix or path.name}'",
+                    )
+                )
+                continue
+            items.append(
+                ResolvedInput(
+                    identifier=str(path),
+                    origin="directory",
+                    from_argument=argument,
+                    group=group,
+                )
+            )
+    return items, skipped
+
+
+def resolve_inputs(
+    identifiers: Sequence[str], *, extra_file_types: Sequence[str] = ()
+) -> ResolvedInputs:
     """Expand every argument into the concrete identifiers `corpus add` acts on.
 
-    Anything that is not a shell pattern is passed through untouched, so this
-    is transparent to arXiv ids, DOIs, URLs and plain paths alike.
+    Anything that is not a directory or a shell pattern is passed through
+    untouched, so this is transparent to arXiv ids, DOIs, URLs and plain paths
+    alike.
     """
-    resolved: list[ResolvedInput] = []
+    resolved = ResolvedInputs()
     for argument in identifiers:
+        expanded = Path(argument).expanduser()
+
+        if expanded.is_dir():
+            items, skipped = _walk_directory(expanded, argument, extra_file_types)
+            if not items:
+                raise InputError(
+                    f"'{argument}' holds no files boepie can convert"
+                    + (
+                        f" ({len(skipped)} skipped as unsupported)."
+                        if skipped
+                        else "."
+                    )
+                )
+            resolved.items.extend(items)
+            resolved.skipped.extend(skipped)
+            continue
+
         # An existing path wins over pattern interpretation: a filename may
         # legitimately contain `[` or `?`, and if it is really there on disk
         # the user cannot have meant it as a pattern.
-        if Path(argument).expanduser().exists():
-            resolved.append(ResolvedInput(identifier=argument))
+        if expanded.exists():
+            resolved.items.append(ResolvedInput(identifier=argument))
             continue
 
         if not looks_like_pattern(argument):
@@ -140,7 +252,7 @@ def resolve_inputs(identifiers: Sequence[str]) -> list[ResolvedInput]:
             # DOI or a URL, which only the collection's own resolver can say,
             # so it passes through and fails there with a message that knows
             # what was tried.
-            resolved.append(ResolvedInput(identifier=argument))
+            resolved.items.append(ResolvedInput(identifier=argument))
             continue
 
         matches = _expand_pattern(argument)
@@ -150,7 +262,7 @@ def resolve_inputs(identifiers: Sequence[str]) -> list[ResolvedInput]:
                 f"files. Check the path, or quote it if your shell expanded "
                 f"it before boepie saw it."
             )
-        resolved.extend(
+        resolved.items.extend(
             ResolvedInput(
                 identifier=str(match), origin="pattern", from_argument=argument
             )

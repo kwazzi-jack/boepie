@@ -42,7 +42,7 @@ from boepie.corpus.layout import (
     title_needs_dot_stripped,
     unique_document_name,
 )
-from boepie.corpus.inputs import resolve_inputs
+from boepie.corpus.inputs import ResolvedInputs, resolve_inputs
 from boepie.corpus.schema import KEY_FIELDS, Source, literature_blocks
 
 # `skipped` is not a soft failure: it is boepie declining to take something it
@@ -64,6 +64,8 @@ class AddOptions:
     mineru_device_mode: str = "auto"
     mineru_backend: str = "pipeline"
     mineru_model_source: str = "auto"
+    # Extra suffixes a folder walk accepts (corpus.extra_file_types).
+    extra_file_types: tuple[str, ...] = ()
     # Politeness delay between pages of a crawled docs site.
     delay: float = 0.2
 
@@ -140,8 +142,15 @@ def _write(
     title: str,
     options: AddOptions,
     blocks: dict[str, Any],
+    group: str | None = None,
 ) -> tuple[str, Path]:
-    """Write one converted source as a corpus document, keeping `state` current."""
+    """Write one converted source as a corpus document, keeping `state` current.
+
+    `group` overrides `options.group` for this one document, which a folder
+    walk needs: every file in a batch shares one `AddOptions` but lands in the
+    group mirroring its own subdirectory. `add_docs` used to express the same
+    thing by rebuilding a throwaway `AddOptions` per page.
+    """
     document_id = unique_id(state.ids)
     state.ids.add(document_id)
 
@@ -166,7 +175,8 @@ def _write(
     if converted.original_bytes is not None and converted.original_name is not None:
         assets = {converted.original_name: converted.original_bytes}
 
-    target_dir = collection_dir / options.group if options.group else collection_dir
+    placement = options.group if group is None else group
+    target_dir = collection_dir / placement if placement else collection_dir
     document = write_leaf_document(
         target_dir / filename,
         document_id=document_id,
@@ -177,6 +187,27 @@ def _write(
     if converted.sha256:
         state.checksums[converted.sha256] = document_id
     return document_id, document.md_path
+
+
+def _group_for(options: AddOptions, walked: str) -> str | None:
+    """Where one walked file lands, given `--group` and its own subdirectory.
+
+    `--group` is a prefix rather than an override once a directory is being
+    walked: collapsing every file into one flat group would undo the very
+    thing the mirrored structure is for, which is keeping same-named files
+    (a `README.md` per subdirectory) apart.
+    """
+    if not walked:
+        return None
+    return f"{options.group}/{walked}" if options.group else walked
+
+
+def _skipped_outcomes(resolved: ResolvedInputs) -> list[AddOutcome]:
+    """Files the walk declined, reported rather than dropped in silence."""
+    return [
+        AddOutcome(identifier=skip.identifier, status="skipped", detail=skip.reason)
+        for skip in resolved.skipped
+    ]
 
 
 def _notice_for(title: str) -> str | None:
@@ -236,11 +267,12 @@ def add_notes(
     block. They are addressed by `id` and reconciled against nothing, which is
     why the old collection-wide `slug` is gone.
     """
-    identifiers = [resolved.identifier for resolved in resolve_inputs(identifiers)]
+    resolved = resolve_inputs(identifiers, extra_file_types=options.extra_file_types)
     state = _CorpusState.load(collection_dir, "notes")
-    outcomes: list[AddOutcome] = []
+    outcomes: list[AddOutcome] = _skipped_outcomes(resolved)
 
-    for identifier in identifiers:
+    for item in resolved.items:
+        identifier = item.identifier
         try:
             converted = _convert_identifier(identifier, options)
         except IntakeError as error:
@@ -262,7 +294,7 @@ def add_notes(
         title = options.title or converted.suggested_title or identifier
         document_id, path = _write(
             collection_dir, state, converted=converted, title=title,
-            options=options, blocks={},
+            options=options, blocks={}, group=_group_for(options, item.group),
         )
         outcomes.append(
             AddOutcome(
@@ -289,7 +321,7 @@ def _resolve_citekey(state: _CorpusState, base: str, override: str | None) -> st
 
 def _add_arxiv_paper(
     collection_dir: Path, state: _CorpusState, arxiv_id: str, identifier: str,
-    options: AddOptions, *, entry: Any = None,
+    options: AddOptions, *, entry: Any = None, group: str | None = None,
 ) -> AddOutcome:
     """Look a paper up on arXiv, fetch its HTML, and convert it locally.
 
@@ -366,6 +398,7 @@ def _add_arxiv_paper(
             year=metadata["year"], arxiv_id=arxiv_id,
             doi=entry.doi if entry is not None else None,
         ),
+        group=_group_for(options, group or ""),
     )
     state.natural_keys[citekey] = document_id
     state.bib_identities[arxiv_id.lower()] = document_id
@@ -395,15 +428,16 @@ def add_literature(
         resolve_doi_to_arxiv,
     )
 
-    identifiers = [resolved.identifier for resolved in resolve_inputs(identifiers)]
+    resolved = resolve_inputs(identifiers, extra_file_types=options.extra_file_types)
     state = _CorpusState.load(collection_dir, "literature")
-    outcomes: list[AddOutcome] = []
+    outcomes: list[AddOutcome] = _skipped_outcomes(resolved)
 
     # A .bib names many papers, so it expands into the queue rather than
     # becoming one document. Expanded entries carry their own citekey, so an
     # explicit --citekey would be ambiguous across them.
-    queue: list[tuple[str, Any]] = []
-    for identifier in identifiers:
+    queue: list[tuple[str, Any, str]] = []
+    for item in resolved.items:
+        identifier = item.identifier
         if looks_like_bibtex(identifier) and Path(identifier).expanduser().is_file():
             try:
                 entries = parse_bibtex_file(Path(identifier).expanduser())
@@ -420,11 +454,11 @@ def add_literature(
                     )
                 )
                 continue
-            queue.extend((identifier, entry) for entry in entries)
+            queue.extend((identifier, entry, item.group) for entry in entries)
         else:
-            queue.append((identifier, None))
+            queue.append((identifier, None, item.group))
 
-    for identifier, entry in queue:
+    for identifier, entry, walked_group in queue:
         # A bib entry resolves to whatever it points at: an arXiv id, then a
         # DOI, then a local PDF named by its `file` field.
         if entry is not None:
@@ -433,7 +467,7 @@ def add_literature(
                 outcomes.append(
                     _add_arxiv_paper(
                         collection_dir, state, entry.arxiv_id, label, options,
-                        entry=entry,
+                        entry=entry, group=walked_group,
                     )
                 )
                 continue
@@ -441,7 +475,8 @@ def add_literature(
             if resolved:
                 outcomes.append(
                     _add_arxiv_paper(
-                        collection_dir, state, resolved, label, options, entry=entry
+                        collection_dir, state, resolved, label, options, entry=entry,
+                        group=walked_group,
                     )
                 )
                 continue
@@ -449,7 +484,7 @@ def add_literature(
                 outcomes.append(
                     _add_literature_file(
                         collection_dir, state, Path(entry.file_path).expanduser(),
-                        label, options, entry=entry,
+                        label, options, entry=entry, group=walked_group,
                     )
                 )
                 continue
@@ -472,7 +507,10 @@ def add_literature(
         arxiv_id = arxiv_id_if_reference(identifier)
         if arxiv_id is not None and not Path(identifier).expanduser().is_file():
             outcomes.append(
-                _add_arxiv_paper(collection_dir, state, arxiv_id, identifier, options)
+                _add_arxiv_paper(
+                    collection_dir, state, arxiv_id, identifier, options,
+                    group=walked_group,
+                )
             )
             continue
 
@@ -491,14 +529,20 @@ def add_literature(
                 )
                 continue
             outcomes.append(
-                _add_arxiv_paper(collection_dir, state, resolved, identifier, options)
+                _add_arxiv_paper(
+                    collection_dir, state, resolved, identifier, options,
+                    group=walked_group,
+                )
             )
             continue
 
         path = Path(identifier).expanduser()
         if path.is_file():
             outcomes.append(
-                _add_literature_file(collection_dir, state, path, identifier, options)
+                _add_literature_file(
+                    collection_dir, state, path, identifier, options,
+                    group=walked_group,
+                )
             )
             continue
 
@@ -511,7 +555,8 @@ def add_literature(
             continue
         outcomes.append(
             _finish_literature(
-                collection_dir, state, converted, identifier, options, entry=None
+                collection_dir, state, converted, identifier, options, entry=None,
+                group=walked_group,
             )
         )
 
@@ -520,7 +565,7 @@ def add_literature(
 
 def _add_literature_file(
     collection_dir: Path, state: _CorpusState, path: Path, identifier: str,
-    options: AddOptions, *, entry: Any = None,
+    options: AddOptions, *, entry: Any = None, group: str | None = None,
 ) -> AddOutcome:
     try:
         converted = convert_local_file(
@@ -533,13 +578,14 @@ def _add_literature_file(
     except IntakeError as error:
         return AddOutcome(identifier=identifier, status="failed", detail=str(error))
     return _finish_literature(
-        collection_dir, state, converted, identifier, options, entry=entry
+        collection_dir, state, converted, identifier, options, entry=entry,
+        group=group,
     )
 
 
 def _finish_literature(
     collection_dir: Path, state: _CorpusState, converted: Converted, identifier: str,
-    options: AddOptions, *, entry: Any,
+    options: AddOptions, *, entry: Any, group: str | None = None,
 ) -> AddOutcome:
     """Write a paper that came from a file or a plain URL rather than arXiv.
 
@@ -590,6 +636,7 @@ def _finish_literature(
             citekey=citekey, authors=authors, year=year, doi=doi,
             arxiv_id=arxiv_id,
         ),
+        group=_group_for(options, group or ""),
     )
     state.natural_keys[citekey] = document_id
     for identity in (arxiv_id, doi):
@@ -627,11 +674,18 @@ def add_docs(
     from boepie.docs.manifest import DocsProject
     from boepie.corpus.intake import title_from_markdown
 
-    identifiers = [resolved.identifier for resolved in resolve_inputs(identifiers)]
+    # docs does not mirror a walked directory onto groups, unlike notes and
+    # literature. A docs page's `docs.project` *is* the group it lives in and
+    # is always exactly one level - that is what `search_docs(project=...)`
+    # filters on and what `corpus move` keeps in step. Nesting groups under a
+    # project would leave the field naming a directory the page is not in. So
+    # discovery recurses, and every page found lands in the one named project.
+    resolved = resolve_inputs(identifiers, extra_file_types=options.extra_file_types)
     state = _CorpusState.load(collection_dir, "docs")
-    outcomes: list[AddOutcome] = []
+    outcomes: list[AddOutcome] = _skipped_outcomes(resolved)
 
-    for identifier in identifiers:
+    for item in resolved.items:
+        identifier = item.identifier
         project_name = options.project
         if project_name is None:
             outcomes.append(
