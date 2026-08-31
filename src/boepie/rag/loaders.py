@@ -8,7 +8,9 @@ new source (e.g. plain-text docs) means writing one more loader here.
 
 from __future__ import annotations
 
+import hashlib
 import json
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Protocol, runtime_checkable
 
@@ -43,6 +45,84 @@ class SourceDescribing(Protocol):
     """
 
     def describe_sources(self) -> dict[str, Any]: ...
+
+
+# Bumped when the digest below stops meaning what it used to, so an index
+# built under the old rule is treated as unverifiable rather than as stale.
+_REVISION_FORMAT = "1"
+
+
+def body_digest(text: str) -> str:
+    """The fingerprint of one document's indexed body."""
+    return hashlib.sha256(f"{_REVISION_FORMAT}\x00{text}".encode()).hexdigest()[:16]
+
+
+@dataclass(frozen=True)
+class CorpusRevision:
+    """What an index was built over, in enough detail to detect staleness.
+
+    `path` is where the documents were read from, absolute, and it is what
+    makes the check self-contained: the index says which directory to ask, so
+    nothing has to reconstruct that from configuration. An index built on
+    another machine names a directory that is not here, and is then simply not
+    checked - which is the right answer for a prebuilt index fetched from a
+    release, where there is no local corpus to be inconsistent with.
+
+    `documents` maps each indexed document's id to a digest of the body that
+    was indexed. A map rather than a list because the two halves of staleness
+    are not the same thing:
+
+    - a document that has **changed or gone** since the build makes the index
+      *wrong* - it serves text that is no longer there, under a `source_path`
+      an agent is invited to open with its own file tools;
+    - a document that is **new** since the build makes it merely *incomplete*,
+      which is the normal state between `corpus add` and `index build` and
+      must not be an error, or the documented staging workflow would break
+      search between every add and the rebuild that follows it.
+    """
+
+    path: str
+    documents: dict[str, str] = field(default_factory=dict)
+
+
+@runtime_checkable
+class Revisioned(Protocol):
+    """A loader whose corpus can be fingerprinted, and re-fingerprinted later.
+
+    Optional extension to ``Loader``, and deliberately optional: a loader
+    reading something that cannot be walked again (a fixture, a stream) simply
+    does not implement it, and its index is then recorded as unverifiable
+    rather than as fresh.
+
+    ``corpus_path`` exists separately from ``corpus_revision`` so a build can
+    record the documents it *actually indexed* without walking the corpus a
+    second time - a second walk would also open a window in which the corpus
+    could change between the two, and record a state the index does not have.
+    """
+
+    def corpus_path(self) -> Path: ...
+
+    def corpus_revision(self) -> CorpusRevision | None: ...
+
+
+def _revision_of(loader: Revisioned) -> CorpusRevision | None:
+    """Fingerprint whatever `loader` currently yields.
+
+    ``None`` when there is nothing there to compare against. An absent or
+    empty corpus is not evidence that an index is stale - it is the ordinary
+    shape of a machine holding a fetched index and no corpus of its own - and
+    refusing to serve a working index over it would be the worse failure.
+    """
+    source_dir = loader.corpus_path()
+    if not source_dir.is_dir():
+        return None
+    documents = {
+        document.id: body_digest(document.text)
+        for document in loader.iter_documents()
+    }
+    if not documents:
+        return None
+    return CorpusRevision(path=str(source_dir.resolve()), documents=documents)
 
 
 class _CorpusLoader:
@@ -110,6 +190,12 @@ class _CorpusLoader:
 
     def describe_sources(self) -> dict[str, Any]:
         return {"corpus_dir": self.corpus_dir.name}
+
+    def corpus_path(self) -> Path:
+        return self.corpus_dir
+
+    def corpus_revision(self) -> CorpusRevision | None:
+        return _revision_of(self)
 
 
 class LiteratureLoader(_CorpusLoader):
@@ -227,6 +313,12 @@ class ContextLoader:
     def __init__(self, bundle_dir: Path | str) -> None:
         self.bundle_dir = Path(bundle_dir)
 
+    def corpus_path(self) -> Path:
+        return self.bundle_dir
+
+    def corpus_revision(self) -> CorpusRevision | None:
+        return _revision_of(self)
+
     def describe_sources(self) -> dict[str, Any]:
         """Which bundle snapshot this index was built over.
 
@@ -274,3 +366,33 @@ class ContextLoader:
                 base_path=str(self.bundle_dir),
                 metadata=frontmatter,
             )
+
+
+# ---------------------------------------------------------------------------
+# Re-reading a corpus an index already named
+# ---------------------------------------------------------------------------
+
+
+_LOADERS: dict[str, type] = {
+    "literature": LiteratureLoader,
+    "docs": DocsLoader,
+    "notes": NotesLoader,
+    "context": ContextLoader,
+}
+
+
+def loader_for(collection: str, source_dir: Path | str) -> Loader | None:
+    """The loader that reads `collection` out of `source_dir`.
+
+    Used to re-derive a corpus revision at query time from the directory the
+    index recorded, rather than from configuration: an index and the corpus it
+    was built over can legitimately be decoupled (a test builds a fixture
+    corpus into a temporary index root), and asking the configured directory
+    instead would compare an index against a corpus it was never built from.
+
+    ``None`` for a collection boepie has no loader for, which is honest: an
+    index over something else entirely cannot be verified, and pretending
+    otherwise would fail every such index rather than skip it.
+    """
+    loader_class = _LOADERS.get(collection)
+    return None if loader_class is None else loader_class(source_dir)

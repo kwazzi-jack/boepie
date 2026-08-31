@@ -14,6 +14,7 @@ import tarfile
 import textwrap
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import httpx
 import tomlkit
@@ -91,6 +92,8 @@ from boepie.rag import (
     ContextLoader,
     DocsLoader,
     EmptyCollectionError,
+    StaleIndexError,
+    index_freshness,
     LiteratureLoader,
     ModelBinding,
     NotesLoader,
@@ -320,9 +323,11 @@ def _run(coro):
         return asyncio.run(coro)
     except KeyboardInterrupt:
         raise CliError("cancelled.") from None
-    except EmptyCollectionError:
-        # A ValueError subclass, but one a multi-collection build wants to
-        # catch and skip on; flattening it into CliError here would hide it.
+    except (EmptyCollectionError, StaleIndexError):
+        # Both are ValueError subclasses that a caller sweeping several
+        # collections needs to tell apart from an ordinary failure - one to
+        # skip on, one to stop on - and flattening either into CliError here
+        # would hide it.
         raise
     except (FileNotFoundError, ValueError, RuntimeError) as error:
         raise CliError(str(error)) from error
@@ -605,6 +610,54 @@ def index_fetch(
     )
 
 
+# How each freshness state reads, and how loudly. Only "stale" is a fault;
+# the other three are facts about what can be checked, so they stay dim.
+_FRESHNESS_WORDING: dict[str, str] = {
+    "in step": "in step with its corpus",
+    "corpus absent": "corpus not on this machine (nothing to check against)",
+    "unrecorded": "not recorded (built before this was tracked)",
+}
+
+
+def _report_freshness(collection: str, manifest: dict[str, Any]) -> None:
+    """Say whether an index still matches the corpus it was built over.
+
+    The failure this reports used to be undiagnosable from `status`: an index
+    built over an older corpus answers queries perfectly happily, with
+    plausible scores, pointing at text that has since changed. One line here
+    is what turns that into a thing you can see before it misleads you.
+    """
+    freshness = index_freshness(manifest.get("built_from"), collection)
+    if freshness.state != "stale":
+        display.muted(
+            _FRESHNESS_WORDING[freshness.state],
+            lead=_status_label("corpus"),
+            indent="  ",
+        )
+        return
+
+    counts = ", ".join(
+        part
+        for part in (
+            f"{freshness.changed} changed" if freshness.changed else "",
+            f"{freshness.gone} gone" if freshness.gone else "",
+        )
+        if part
+    )
+    display.warning(
+        f"stale - of {freshness.document_count} document(s), {counts}",
+        lead=_status_label("corpus"),
+        indent="  ",
+    )
+    # The fix goes on its own line in the value column rather than trailing
+    # the row: rich would break `boepie index build --collection notes` across
+    # a line end, which is the exact wrap CliError exists to avoid elsewhere.
+    display.next_step(
+        f"boepie index build --collection {collection}",
+        indent=_STATUS_VALUE_INDENT,
+    )
+
+
 @index.command("status")
 def index_status() -> None:
     """Report the status of all indices under the index directory.
@@ -664,6 +717,7 @@ def index_status() -> None:
                     lead=_status_label("embedding"),
                     indent="  ",
                 )
+                _report_freshness(collection_name, manifest)
 
         # Only what you could switch *to*: repeating the active id under
         # "available" is the one-element case saying nothing twice.
@@ -1746,9 +1800,13 @@ def search_cli(
             )
         )
         if outcome.error:
-            # One collection missing an index is fatal only when it is the
-            # one you asked for; in a sweep it is just not part of the answer.
-            if not sweeping:
+            # A collection you have not indexed is fatal only when it is the
+            # one you asked for; in a sweep it is simply not part of the
+            # answer. Anything else - a stale index, an embedding mismatch -
+            # stops the search even in a sweep, because silently dropping a
+            # collection the user believes was searched is the failure this
+            # whole check exists to prevent.
+            if not (sweeping and outcome.missing_index):
                 _emit_outcome_error(outcome.error)
             continue
         if outcome.note:
@@ -1894,6 +1952,11 @@ def read_cli(
                     view=VIEWS[candidate],
                 )
             )
+        except StaleIndexError as error:
+            # Not "look in the next one": a stale index would otherwise be
+            # reported as an unknown document id, which is the silent failure
+            # `built_from` exists to prevent.
+            raise CliError(str(error)) from error
         except CliError:
             # "not indexed here" and "no such document here" are both just
             # "look in the next one" when the caller did not name a collection.
@@ -1964,7 +2027,11 @@ async def _read_span(
         raise CliError(
             f"no '{collection}' index found. Run {view.missing_index_fix}."
         ) from None
-    except ValueError as error:
+    except StaleIndexError:
+        # Never softened into CliError: `read` tries each collection in turn
+        # and treats a CliError as "look in the next one", which would report
+        # a stale index as an unknown document id.
+        raise
         raise CliError(one_line(error)) from error
     except KeyError as error:
         raise CliError(

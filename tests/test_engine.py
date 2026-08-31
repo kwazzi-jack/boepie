@@ -100,25 +100,28 @@ async def test_build_writes_a_self_contained_collection(tmp_path, fake_embedding
     assert matrix.shape == (manifest.count, len(_VOCAB))
 
 
-async def test_build_records_indexed_documents_in_manifest(tmp_path, fake_embedding):
-    """Provenance is derived from the build, so it cannot drift from the index.
-
-    FakeLoader has no describe_sources: a loader with nothing external to point
-    at still gets its document list recorded.
-    """
+async def test_a_loader_that_cannot_be_fingerprinted_records_no_revision(
+    tmp_path, fake_embedding
+):
+    """`built_from: null` means *unverifiable*, and must never be read as
+    fresh. FakeLoader yields documents from memory, so there is no corpus to
+    walk again and nothing this index could later be compared against."""
     manifest = await _build(tmp_path)
 
-    assert manifest.sources is not None
-    assert manifest.sources["documents"] == list(_DOCS)
+    assert manifest.built_from is None
 
     on_disk = json.loads(
         (tmp_path / "tiny" / manifest.index_id / "manifest.json").read_text(encoding="utf-8")
     )
-    assert on_disk["sources"]["documents"] == list(_DOCS)
+    assert on_disk["built_from"] is None
 
 
 async def test_build_records_loader_described_sources(tmp_path, fake_embedding):
-    """A loader's own corpus-level provenance is merged in alongside the ids."""
+    """A loader's own corpus-level provenance, and only that.
+
+    Which documents were indexed lives in `built_from`, where it is recorded
+    with the digests that make it checkable. A second copy here would be one
+    more thing that could disagree with the index beside it."""
 
     class DescribingLoader(FakeLoader):
         def describe_sources(self):
@@ -131,7 +134,7 @@ async def test_build_records_loader_described_sources(tmp_path, fake_embedding):
     assert manifest.sources is not None
     assert manifest.sources["corpus_dir"] == "somewhere"
     assert manifest.sources["projects"] == [{"project": "tiny"}]
-    assert manifest.sources["documents"] == list(_DOCS)
+    assert "documents" not in manifest.sources
 
 
 async def test_manifest_without_sources_still_loads(tmp_path, fake_embedding):

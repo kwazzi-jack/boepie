@@ -48,7 +48,14 @@ from boepie.config import DEFAULT_TOP_K, FUSION_CANDIDATES, INDEX_DIR
 from boepie.rag.bm25 import Bm25Index
 from boepie.rag.chunking import chunk_document
 from boepie.rag.embedding import ModelBinding, default_embedding_binding, embed_texts
-from boepie.rag.loaders import Loader, SourceDescribing
+from boepie.rag.loaders import (
+    CorpusRevision,
+    Loader,
+    Revisioned,
+    SourceDescribing,
+    body_digest,
+    loader_for,
+)
 from boepie.rag.models import Chunk, Filter, SearchResult, combine_filters
 from boepie.rag.search import _rank_of, _reciprocal_rank_fusion
 
@@ -104,26 +111,146 @@ class BuildManifest:
     # the document ids actually indexed. Defaults to None so indices built
     # before provenance was recorded still load.
     sources: dict[str, Any] | None = None
+    # Which corpus, in which state, this index was built over. The one field
+    # here that prevents wrong answers rather than describing them - see
+    # `_stale_reason`. None when the loader could not be fingerprinted, which
+    # is read as "unverifiable", never as "fresh".
+    built_from: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
-def _collect_sources(loader: Loader, document_ids: list[str]) -> dict[str, Any]:
-    """Provenance to record in the manifest for this build.
+def _collect_sources(loader: Loader) -> dict[str, Any]:
+    """Corpus-level provenance to record in the manifest for this build.
 
-    ``documents`` is taken from the ids the loader actually yielded on this
-    run, not from a list maintained by hand: the record then cannot drift from
-    the index it sits next to. A loader implementing ``describe_sources``
-    supplies the surrounding context (upstream URLs, versions, bibliography);
-    one that does not - a test double, or a corpus with nothing external to
-    point at - still gets the document list.
+    The surrounding context only - which upstream site and version a docs page
+    came from, which bibliography a citekey came out of. *Which* documents
+    were indexed belongs to `built_from`, which records them with the digests
+    that make the record checkable; keeping a second copy of the id list here
+    would be one more thing that can disagree with the index beside it.
+
+    A loader that cannot describe itself - a test double, or a corpus with
+    nothing external to point at - contributes nothing rather than failing.
     """
-    sources: dict[str, Any] = (
+    return (
         dict(loader.describe_sources()) if isinstance(loader, SourceDescribing) else {}
     )
-    sources["documents"] = document_ids
-    return sources
+
+
+def _record_revision(
+    loader: Loader, indexed: dict[str, str]
+) -> dict[str, Any] | None:
+    """The `built_from` block for this build, if the loader can supply one.
+
+    `indexed` is what the build loop actually read, not a fresh walk: the
+    record then describes the index sitting next to it rather than the corpus
+    as it stood a moment later.
+    """
+    if not isinstance(loader, Revisioned):
+        return None
+    source_dir = loader.corpus_path()
+    if not source_dir.is_dir():
+        return None
+    return asdict(CorpusRevision(path=str(source_dir.resolve()), documents=indexed))
+
+
+class StaleIndexError(ValueError):
+    """The corpus moved on after the index was built, so its hits are wrong.
+
+    A ValueError subclass for the same reason `EmptyCollectionError` is: the
+    CLI and the MCP read/search paths already turn a ValueError into a clean
+    message rather than a traceback, and this one carries the command that
+    fixes it.
+    """
+
+
+type IndexState = Literal["in step", "stale", "corpus absent", "unrecorded"]
+
+
+@dataclass(frozen=True)
+class IndexFreshness:
+    """Whether an index still matches the corpus it was built over.
+
+    Four states, and only one of them is a fault:
+
+    ``in step``       every document the index holds is still on disk, unchanged.
+    ``stale``         at least one is changed or gone, so hits are wrong.
+    ``corpus absent`` no corpus here to compare against - the ordinary shape of
+                      a machine holding a prebuilt index fetched from a release.
+    ``unrecorded``    the index predates this check, or was built by a loader
+                      that cannot be walked again. Unverifiable, never "fresh".
+
+    Documents *added* since the build appear in none of these counts. They
+    leave the index incomplete rather than wrong, which is the normal state
+    between a `corpus add` and the `index build` that follows it.
+    """
+
+    state: IndexState
+    corpus_path: str | None = None
+    document_count: int = 0
+    changed: int = 0
+    gone: int = 0
+
+
+def index_freshness(
+    built_from: dict[str, Any] | None, collection: str
+) -> IndexFreshness:
+    """Compare an index's recorded corpus against what is on disk now.
+
+    Takes the manifest's `built_from` block rather than the whole manifest:
+    that is the only field this needs, and `index status` reads manifests
+    straight off disk, where a truncated or foreign one must produce a status
+    line rather than a crash.
+    """
+    if not built_from:
+        return IndexFreshness(state="unrecorded")
+    recorded = CorpusRevision(**built_from)
+    loader = loader_for(collection, Path(recorded.path))
+    if loader is None:
+        # A collection boepie has no loader for cannot be verified, and
+        # failing every such index would be worse than not checking it.
+        return IndexFreshness(state="unrecorded", corpus_path=recorded.path)
+
+    current = loader.corpus_revision() if isinstance(loader, Revisioned) else None
+    if current is None:
+        return IndexFreshness(
+            state="corpus absent",
+            corpus_path=recorded.path,
+            document_count=len(recorded.documents),
+        )
+
+    gone = set(recorded.documents) - set(current.documents)
+    changed = {
+        document_id
+        for document_id, digest in recorded.documents.items()
+        if document_id in current.documents
+        and current.documents[document_id] != digest
+    }
+    return IndexFreshness(
+        state="stale" if (gone or changed) else "in step",
+        corpus_path=recorded.path,
+        document_count=len(recorded.documents),
+        changed=len(changed),
+        gone=len(gone),
+    )
+
+
+def _stale_reason(manifest: BuildManifest, collection: str) -> str | None:
+    """Why `manifest`'s index must not be served, or None if it may be."""
+    freshness = index_freshness(manifest.built_from, collection)
+    if freshness.state != "stale":
+        return None
+    counts = [
+        f"{freshness.changed} changed" if freshness.changed else "",
+        f"{freshness.gone} gone" if freshness.gone else "",
+    ]
+    return (
+        f"the '{collection}' index is stale: of the "
+        f"{freshness.document_count} document(s) it was built over, "
+        f"{' and '.join(part for part in counts if part)} on disk. "
+        f"{_rebuild_hint(collection)}"
+    )
 
 
 class EmptyCollectionError(ValueError):
@@ -168,9 +295,9 @@ async def build(
         raise ValueError("embedding binding requires dim")
 
     chunks: list[Chunk] = []
-    document_ids: list[str] = []
+    indexed: dict[str, str] = {}
     for document in loader.iter_documents():
-        document_ids.append(document.id)
+        indexed[document.id] = body_digest(document.text)
         for chunk in chunk_document(document):
             chunk.collection = loader.name
             chunk.id = f"{document.id}::{len(chunks)}"
@@ -218,7 +345,8 @@ async def build(
         embedding_dim=embedding.dim if embedding is not None else None,
         lexical_only=embedding is None,
         built_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        sources=_collect_sources(loader, document_ids),
+        sources=_collect_sources(loader),
+        built_from=_record_revision(loader, indexed),
     )
     (collection_dir / _MANIFEST_FILE).write_text(
         json.dumps(manifest.to_dict(), indent=2), encoding="utf-8"
@@ -266,6 +394,20 @@ def _build_hint(collection: str) -> str:
     )
 
 
+def _rebuild_hint(collection: str) -> str:
+    """The command that brings `collection`'s index back in step with its corpus.
+
+    Deliberately not `_build_hint`: that one offers `index fetch` as the
+    end-user route to an index that does not exist yet, and fetching is the
+    one thing that cannot fix staleness. A prebuilt index is built over
+    boepie's own corpus, not over the local one that just changed, so it would
+    replace a stale answer with an unrelated one.
+    """
+    if collection == "context":
+        return "Run `boepie context apply` to rebuild it."
+    return f"Run `boepie index build --collection {collection}` to rebuild it."
+
+
 def _resolve_index_id(index_root: Path, collection: str, index_id: str | None) -> str:
     if index_id is not None:
         return index_id
@@ -303,6 +445,9 @@ async def load_for_query(
             f"{collection_dir}. {_build_hint(collection)}"
         )
     manifest = BuildManifest(**json.loads(manifest_path.read_text(encoding="utf-8")))
+    stale = _stale_reason(manifest, collection)
+    if stale is not None:
+        raise StaleIndexError(stale)
     chunks = _read_chunks(collection_dir / _CHUNKS_FILE)
     bm25 = Bm25Index.load(collection_dir / _BM25_DIR, len(chunks))
 

@@ -370,6 +370,13 @@ class SearchOutcome:
     results: list[SearchResult] = field(default_factory=list)
     note: str | None = None
     error: str | None = None
+    # This collection has no index at all, as opposed to having one that
+    # cannot be used. The distinction only matters to a sweep across every
+    # collection, where "you have not built this one" is fairly left out of
+    # the answer and "this one's index is stale" or "built with a different
+    # embedding model" is not - those would drop a collection the user
+    # believes was searched.
+    missing_index: bool = False
 
 
 async def search_with_lexical_fallback(
@@ -402,7 +409,8 @@ async def search_with_lexical_fallback(
         )
     except FileNotFoundError:
         return SearchOutcome(
-            error=f"Error: no '{collection}' index found. Run {missing_index_fix}."
+            error=f"Error: no '{collection}' index found. Run {missing_index_fix}.",
+            missing_index=True,
         )
     except ValueError as error:
         return SearchOutcome(error=f"Error: {one_line(error)}")
