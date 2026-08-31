@@ -178,7 +178,7 @@ requires-dist = [
     { name = "markdown-it-py", specifier = ">=4.2.0" },
     { name = "markdownify", specifier = ">=1.2.3" },
     { name = "mdit-py-plugins", specifier = ">=0.6.1" },
-    { name = "mineru", extras = ["pipeline"], marker = "extra == 'mineru'", specifier = ">=2.0" },
+    { name = "mineru", extras = ["pipeline"], marker = "extra == 'mineru'", specifier = ">=3" },
     { name = "numpy", specifier = ">=2.4.6" },
     { name = "ollama", specifier = ">=0.6.2" },
     { name = "openai", specifier = ">=2.41.1" },

@@ -52,7 +52,7 @@ boepie = "boepie.__main__:main"
 
 [project.optional-dependencies]
 mineru = [
-    "mineru[pipeline]>=2.0",
+    "mineru[pipeline]>=3",
 ]
 
 [tool.pytest.ini_options]

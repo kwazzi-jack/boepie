@@ -195,11 +195,25 @@ class MineruSettings(BaseModel):
             "variable unset so MinerU detects the device itself."
         ),
     )
-    backend: Literal["pipeline", "vlm", "hybrid"] = Field(
+    backend: Literal["pipeline", "vlm-engine", "hybrid-engine"] = Field(
         "pipeline",
         description=(
-            "'pipeline' is fast and uses no LLM; 'vlm' adds a vision-language "
-            "pass for figures and complex layouts; 'hybrid' does both."
+            "'pipeline' is fast and uses no LLM; 'vlm-engine' adds a "
+            "vision-language pass for figures and complex layouts; "
+            "'hybrid-engine' does both. MinerU's two '*-http-client' backends "
+            "are deliberately absent: they offload to a server whose URL "
+            "boepie has no setting for."
+        ),
+    )
+    batch_size: int = Field(
+        8,
+        ge=0,
+        description=(
+            "How many documents one MinerU process converts. MinerU spends "
+            "about 20 seconds loading its models before converting anything, "
+            "so batching amortises that; but it writes nothing until a run "
+            "finishes, so a large run shows no progress and keeps nothing if "
+            "interrupted. 0 converts the whole batch in a single run."
         ),
     )
     model_source: Literal["auto", "huggingface", "modelscope", "local"] = Field(

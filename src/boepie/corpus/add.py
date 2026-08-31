@@ -19,8 +19,8 @@ resolvers and its own frontmatter block:
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable, Iterator, Sequence
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -28,11 +28,17 @@ import httpx
 
 from boepie.corpus.document import write_leaf_document
 from boepie.corpus.intake import (
+    MINERU_FORMATS,
     Converted,
     IntakeError,
     convert_local_file,
     convert_url,
+    convert_with_mineru,
+    detect_format,
     looks_like_url,
+    mineru_no_markdown,
+    require_mineru,
+    sha256_of,
 )
 from boepie.corpus.ids import unique_id
 from boepie.corpus.layout import (
@@ -51,6 +57,11 @@ from boepie.corpus.schema import KEY_FIELDS, Source, literature_blocks
 # or a directory containing one file boepie cannot read would fail the command.
 type AddStatus = Literal["added", "duplicate", "failed", "skipped"]
 
+# Called with (documents in this run, run number, total runs) before each
+# MinerU run starts. A run is the only moment there is to report: MinerU
+# writes nothing until it finishes one.
+type BatchProgress = Callable[[int, int, int], None]
+
 
 @dataclass(frozen=True)
 class AddOptions:
@@ -64,6 +75,7 @@ class AddOptions:
     mineru_device_mode: str = "auto"
     mineru_backend: str = "pipeline"
     mineru_model_source: str = "auto"
+    mineru_batch_size: int = 8
     # Extra suffixes a folder walk accepts (corpus.extra_file_types).
     extra_file_types: tuple[str, ...] = ()
     # Politeness delay between pages of a crawled docs site.
@@ -210,6 +222,143 @@ def _skipped_outcomes(resolved: ResolvedInputs) -> list[AddOutcome]:
     ]
 
 
+# ---------------------------------------------------------------------------
+# The up-front MinerU pass
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _BinaryPlan:
+    """Everything settled about a batch's binary documents before it is written.
+
+    Two things happen here that used to happen one document at a time.
+
+    A source's checksum is compared against the collection *before* it is
+    converted, so re-adding a folder costs a file read per document rather
+    than a full conversion whose result is then thrown away. Duplicate
+    detection already worked; it just used to work after the expensive part.
+
+    What is left is converted in runs, because MinerU loads its model stack
+    once per process - about twenty seconds - and then converts at roughly
+    sixteen seconds a document. Converting fifty papers one process at a time
+    spends most of its time loading the same models over and over.
+    """
+
+    # Ready to write. Keyed by the path as the caller spells it, since that is
+    # what the per-document loops have in hand.
+    converted: dict[Path, Converted] = field(default_factory=dict)
+    # Already answered: a duplicate found by checksum, or a document MinerU
+    # could not convert. Carries no identifier of its own - the loop knows how
+    # the user named the file, which for a `.bib` entry is not the path.
+    settled: dict[Path, AddOutcome] = field(default_factory=dict)
+
+
+def _binary_candidates(identifiers: Iterable[str]) -> list[Path]:
+    """The local files in a batch that MinerU will have to convert.
+
+    Deduplicated: the same PDF named twice in one command would otherwise be
+    converted twice to have the second copy rejected as a duplicate of the
+    first.
+    """
+    candidates: dict[Path, None] = {}
+    for identifier in identifiers:
+        path = Path(identifier).expanduser()
+        if path.is_file() and detect_format(path) in MINERU_FORMATS:
+            candidates.setdefault(path, None)
+    return list(candidates)
+
+
+def _conversion_runs(paths: Sequence[Path], size: int) -> Iterator[Sequence[Path]]:
+    """Split a conversion into runs of `size`, or one run when `size` is 0.
+
+    MinerU writes nothing until a run finishes - of four documents in one
+    call, three appeared within fifty milliseconds of each other at the very
+    end - so one run over a whole folder reports no progress and keeps nothing
+    if it is interrupted. Chunking costs one extra model load per run, about
+    two minutes across forty-seven papers, and buys both of those back.
+    """
+    if size <= 0:
+        yield paths
+        return
+    for start in range(0, len(paths), size):
+        yield paths[start : start + size]
+
+
+def _plan_binaries(
+    identifiers: Iterable[str],
+    state: _CorpusState,
+    options: AddOptions,
+    *,
+    on_batch: BatchProgress | None = None,
+) -> _BinaryPlan:
+    """Settle the duplicates and convert the rest, before anything is written."""
+    plan = _BinaryPlan()
+    candidates = _binary_candidates(identifiers)
+    if not candidates:
+        return plan
+
+    pending: list[Path] = []
+    for path in candidates:
+        existing = state.checksums.get(sha256_of(path.read_bytes()))
+        if existing is not None:
+            plan.settled[path] = AddOutcome(
+                identifier=str(path),
+                status="duplicate",
+                document_id=existing,
+                detail="identical content is already in this collection",
+            )
+        else:
+            pending.append(path)
+
+    if not pending:
+        return plan
+
+    # Checked once, and before the first conversion rather than during it:
+    # fifty copies of the same install instructions say no more than one, and
+    # a batch that needs MinerU cannot get anywhere without it.
+    require_mineru(pending)
+
+    runs = list(_conversion_runs(pending, options.mineru_batch_size))
+    for number, run in enumerate(runs, start=1):
+        if on_batch is not None:
+            on_batch(len(run), number, len(runs))
+        try:
+            result = convert_with_mineru(
+                run,
+                device_mode=options.mineru_device_mode,
+                backend=options.mineru_backend,
+                model_source=options.mineru_model_source,
+            )
+        except IntakeError as error:
+            # A run that failed outright fails its own documents and no more:
+            # the next run still starts, so one unreadable file cannot cost a
+            # folder the other forty.
+            for path in run:
+                plan.settled[path] = AddOutcome(
+                    identifier=str(path), status="failed", detail=str(error)
+                )
+            continue
+
+        for path in run:
+            markdown = result.markdown.get(path)
+            if markdown is None:
+                plan.settled[path] = AddOutcome(
+                    identifier=str(path),
+                    status="failed",
+                    detail=mineru_no_markdown(path, result.failure_reason),
+                )
+                continue
+            plan.converted[path] = convert_local_file(
+                path,
+                keep_original=options.keep_original,
+                mineru_device_mode=options.mineru_device_mode,
+                mineru_backend=options.mineru_backend,
+                mineru_model_source=options.mineru_model_source,
+                prepared_markdown=markdown,
+            )
+    return plan
+
+
 def _notice_for(title: str) -> str | None:
     """A remark worth surfacing about how `title` had to be written.
 
@@ -232,13 +381,18 @@ def _duplicate_by_checksum(state: _CorpusState, converted: Converted) -> str | N
     return state.checksums.get(converted.sha256)
 
 
-def _convert_identifier(identifier: str, options: AddOptions) -> Converted:
+def _convert_identifier(
+    identifier: str, options: AddOptions, plan: _BinaryPlan
+) -> Converted:
     """The shared core: a local path or an http(s) URL becomes Markdown."""
     if looks_like_url(identifier):
         return convert_url(identifier, keep_original=options.keep_original)
 
     path = Path(identifier).expanduser()
     if path.is_file():
+        ready = plan.converted.get(path)
+        if ready is not None:
+            return ready
         return convert_local_file(
             path,
             keep_original=options.keep_original,
@@ -259,7 +413,11 @@ def _convert_identifier(identifier: str, options: AddOptions) -> Converted:
 
 
 def add_notes(
-    collection_dir: Path, identifiers: Sequence[str], options: AddOptions
+    collection_dir: Path,
+    identifiers: Sequence[str],
+    options: AddOptions,
+    *,
+    on_batch: BatchProgress | None = None,
 ) -> list[AddOutcome]:
     """Add local files or URLs to the notes corpus.
 
@@ -270,11 +428,19 @@ def add_notes(
     resolved = resolve_inputs(identifiers, extra_file_types=options.extra_file_types)
     state = _CorpusState.load(collection_dir, "notes")
     outcomes: list[AddOutcome] = _skipped_outcomes(resolved)
+    plan = _plan_binaries(
+        (item.identifier for item in resolved.items), state, options,
+        on_batch=on_batch,
+    )
 
     for item in resolved.items:
         identifier = item.identifier
+        settled = plan.settled.get(Path(identifier).expanduser())
+        if settled is not None:
+            outcomes.append(replace(settled, identifier=identifier))
+            continue
         try:
-            converted = _convert_identifier(identifier, options)
+            converted = _convert_identifier(identifier, options, plan)
         except IntakeError as error:
             outcomes.append(
                 AddOutcome(identifier=identifier, status="failed", detail=str(error))
@@ -285,7 +451,9 @@ def add_notes(
         if existing is not None:
             outcomes.append(
                 AddOutcome(
-                    identifier=identifier, status="duplicate", document_id=existing,
+                    identifier=identifier,
+                    status="duplicate",
+                    document_id=existing,
                     detail="identical content is already in this collection",
                 )
             )
@@ -293,13 +461,22 @@ def add_notes(
 
         title = options.title or converted.suggested_title or identifier
         document_id, path = _write(
-            collection_dir, state, converted=converted, title=title,
-            options=options, blocks={}, group=_group_for(options, item.group),
+            collection_dir,
+            state,
+            converted=converted,
+            title=title,
+            options=options,
+            blocks={},
+            group=_group_for(options, item.group),
         )
         outcomes.append(
             AddOutcome(
-                identifier=identifier, status="added", document_id=document_id,
-                title=title, path=path, via=converted.via,
+                identifier=identifier,
+                status="added",
+                document_id=document_id,
+                title=title,
+                path=path,
+                via=converted.via,
                 notice=_notice_for(title),
             )
         )
@@ -320,8 +497,14 @@ def _resolve_citekey(state: _CorpusState, base: str, override: str | None) -> st
 
 
 def _add_arxiv_paper(
-    collection_dir: Path, state: _CorpusState, arxiv_id: str, identifier: str,
-    options: AddOptions, *, entry: Any = None, group: str | None = None,
+    collection_dir: Path,
+    state: _CorpusState,
+    arxiv_id: str,
+    identifier: str,
+    options: AddOptions,
+    *,
+    entry: Any = None,
+    group: str | None = None,
 ) -> AddOutcome:
     """Look a paper up on arXiv, fetch its HTML, and convert it locally.
 
@@ -335,7 +518,9 @@ def _add_arxiv_paper(
     already = state.bib_identities.get(arxiv_id.lower())
     if already is not None:
         return AddOutcome(
-            identifier=identifier, status="duplicate", document_id=already,
+            identifier=identifier,
+            status="duplicate",
+            document_id=already,
             detail=f"arXiv:{arxiv_id} is already in this collection",
         )
 
@@ -343,12 +528,14 @@ def _add_arxiv_paper(
         metadata = lookup_arxiv_metadata(arxiv_id)
     except httpx.HTTPError as error:
         return AddOutcome(
-            identifier=identifier, status="failed",
+            identifier=identifier,
+            status="failed",
             detail=f"could not reach arXiv: {error}",
         )
     if metadata is None:
         return AddOutcome(
-            identifier=identifier, status="failed",
+            identifier=identifier,
+            status="failed",
             detail=f"arXiv has no entry for '{arxiv_id}'.",
         )
 
@@ -363,7 +550,8 @@ def _add_arxiv_paper(
     citekey = _resolve_citekey(state, base_citekey, options.citekey)
     if citekey in state.natural_keys:
         return AddOutcome(
-            identifier=identifier, status="duplicate",
+            identifier=identifier,
+            status="duplicate",
             document_id=state.natural_keys[citekey],
             detail=f"citekey '{citekey}' is already in this collection",
         )
@@ -375,7 +563,8 @@ def _add_arxiv_paper(
 
     if result.markdown is None:
         return AddOutcome(
-            identifier=identifier, status="failed",
+            identifier=identifier,
+            status="failed",
             detail=(
                 f"arXiv:{arxiv_id} has no HTML rendering at arxiv.org or ar5iv "
                 f"(common for pre-2007 submissions). Supply the PDF instead: "
@@ -392,10 +581,16 @@ def _add_arxiv_paper(
     )
     title = options.title or metadata["title"]
     document_id, path = _write(
-        collection_dir, state, converted=converted, title=title, options=options,
+        collection_dir,
+        state,
+        converted=converted,
+        title=title,
+        options=options,
         blocks=literature_blocks(
-            citekey=citekey, authors=metadata["authors"],
-            year=metadata["year"], arxiv_id=arxiv_id,
+            citekey=citekey,
+            authors=metadata["authors"],
+            year=metadata["year"],
+            arxiv_id=arxiv_id,
             doi=entry.doi if entry is not None else None,
         ),
         group=_group_for(options, group or ""),
@@ -405,13 +600,22 @@ def _add_arxiv_paper(
     if entry is not None and entry.doi:
         state.bib_identities[entry.doi.lower()] = document_id
     return AddOutcome(
-        identifier=identifier, status="added", document_id=document_id,
-        title=title, path=path, via=converted.via, notice=_notice_for(title),
+        identifier=identifier,
+        status="added",
+        document_id=document_id,
+        title=title,
+        path=path,
+        via=converted.via,
+        notice=_notice_for(title),
     )
 
 
 def add_literature(
-    collection_dir: Path, identifiers: Sequence[str], options: AddOptions
+    collection_dir: Path,
+    identifiers: Sequence[str],
+    options: AddOptions,
+    *,
+    on_batch: BatchProgress | None = None,
 ) -> list[AddOutcome]:
     """Add papers by arXiv id, DOI, .bib file, local file, or URL.
 
@@ -443,13 +647,16 @@ def add_literature(
                 entries = parse_bibtex_file(Path(identifier).expanduser())
             except OSError as error:
                 outcomes.append(
-                    AddOutcome(identifier=identifier, status="failed", detail=str(error))
+                    AddOutcome(
+                        identifier=identifier, status="failed", detail=str(error)
+                    )
                 )
                 continue
             if not entries:
                 outcomes.append(
                     AddOutcome(
-                        identifier=identifier, status="failed",
+                        identifier=identifier,
+                        status="failed",
                         detail="no usable entries found in this BibTeX file.",
                     )
                 )
@@ -457,6 +664,26 @@ def add_literature(
             queue.extend((identifier, entry, item.group) for entry in entries)
         else:
             queue.append((identifier, None, item.group))
+
+    # A `.bib` entry only reaches its `file` path when it has neither an arXiv
+    # id nor a resolvable DOI, and whether a DOI resolves is a network answer
+    # this pass deliberately does not wait for. So an entry carrying a DOI
+    # keeps the old one-at-a-time conversion; the common batch - a folder of
+    # PDFs, or a bibliography of scans with no identifiers - is planned here.
+    plan = _plan_binaries(
+        [identifier for identifier, entry, _ in queue if entry is None]
+        + [
+            entry.file_path
+            for _, entry, _ in queue
+            if entry is not None
+            and entry.file_path
+            and not entry.arxiv_id
+            and not entry.doi
+        ],
+        state,
+        options,
+        on_batch=on_batch,
+    )
 
     for identifier, entry, walked_group in queue:
         # A bib entry resolves to whatever it points at: an arXiv id, then a
@@ -466,16 +693,26 @@ def add_literature(
             if entry.arxiv_id:
                 outcomes.append(
                     _add_arxiv_paper(
-                        collection_dir, state, entry.arxiv_id, label, options,
-                        entry=entry, group=walked_group,
+                        collection_dir,
+                        state,
+                        entry.arxiv_id,
+                        label,
+                        options,
+                        entry=entry,
+                        group=walked_group,
                     )
                 )
                 continue
-            resolved = resolve_doi_to_arxiv(entry.doi) if entry.doi else None
-            if resolved:
+            preprint_id = resolve_doi_to_arxiv(entry.doi) if entry.doi else None
+            if preprint_id:
                 outcomes.append(
                     _add_arxiv_paper(
-                        collection_dir, state, resolved, label, options, entry=entry,
+                        collection_dir,
+                        state,
+                        preprint_id,
+                        label,
+                        options,
+                        entry=entry,
                         group=walked_group,
                     )
                 )
@@ -483,14 +720,21 @@ def add_literature(
             if entry.file_path and Path(entry.file_path).expanduser().is_file():
                 outcomes.append(
                     _add_literature_file(
-                        collection_dir, state, Path(entry.file_path).expanduser(),
-                        label, options, entry=entry, group=walked_group,
+                        collection_dir,
+                        state,
+                        Path(entry.file_path).expanduser(),
+                        label,
+                        options,
+                        plan,
+                        entry=entry,
+                        group=walked_group,
                     )
                 )
                 continue
             outcomes.append(
                 AddOutcome(
-                    identifier=label, status="failed",
+                    identifier=label,
+                    status="failed",
                     detail=(
                         "no arXiv id, resolvable DOI, or readable file for this "
                         "entry - add its PDF directly."
@@ -508,7 +752,11 @@ def add_literature(
         if arxiv_id is not None and not Path(identifier).expanduser().is_file():
             outcomes.append(
                 _add_arxiv_paper(
-                    collection_dir, state, arxiv_id, identifier, options,
+                    collection_dir,
+                    state,
+                    arxiv_id,
+                    identifier,
+                    options,
                     group=walked_group,
                 )
             )
@@ -516,11 +764,12 @@ def add_literature(
 
         doi = normalize_doi(identifier)
         if doi is not None and not Path(identifier).expanduser().is_file():
-            resolved = resolve_doi_to_arxiv(doi)
-            if resolved is None:
+            preprint_id = resolve_doi_to_arxiv(doi)
+            if preprint_id is None:
                 outcomes.append(
                     AddOutcome(
-                        identifier=identifier, status="failed",
+                        identifier=identifier,
+                        status="failed",
                         detail=(
                             f"arXiv has no preprint for DOI {doi}. Supply the "
                             f"publisher PDF instead, if its licence allows."
@@ -530,7 +779,11 @@ def add_literature(
                 continue
             outcomes.append(
                 _add_arxiv_paper(
-                    collection_dir, state, resolved, identifier, options,
+                    collection_dir,
+                    state,
+                    preprint_id,
+                    identifier,
+                    options,
                     group=walked_group,
                 )
             )
@@ -540,14 +793,19 @@ def add_literature(
         if path.is_file():
             outcomes.append(
                 _add_literature_file(
-                    collection_dir, state, path, identifier, options,
+                    collection_dir,
+                    state,
+                    path,
+                    identifier,
+                    options,
+                    plan,
                     group=walked_group,
                 )
             )
             continue
 
         try:
-            converted = _convert_identifier(identifier, options)
+            converted = _convert_identifier(identifier, options, plan)
         except IntakeError as error:
             outcomes.append(
                 AddOutcome(identifier=identifier, status="failed", detail=str(error))
@@ -555,7 +813,12 @@ def add_literature(
             continue
         outcomes.append(
             _finish_literature(
-                collection_dir, state, converted, identifier, options, entry=None,
+                collection_dir,
+                state,
+                converted,
+                identifier,
+                options,
+                entry=None,
                 group=walked_group,
             )
         )
@@ -564,28 +827,54 @@ def add_literature(
 
 
 def _add_literature_file(
-    collection_dir: Path, state: _CorpusState, path: Path, identifier: str,
-    options: AddOptions, *, entry: Any = None, group: str | None = None,
+    collection_dir: Path,
+    state: _CorpusState,
+    path: Path,
+    identifier: str,
+    options: AddOptions,
+    plan: _BinaryPlan,
+    *,
+    entry: Any = None,
+    group: str | None = None,
 ) -> AddOutcome:
-    try:
-        converted = convert_local_file(
-            path,
-            keep_original=options.keep_original,
-            mineru_device_mode=options.mineru_device_mode,
-            mineru_backend=options.mineru_backend,
-            mineru_model_source=options.mineru_model_source,
-        )
-    except IntakeError as error:
-        return AddOutcome(identifier=identifier, status="failed", detail=str(error))
+    settled = plan.settled.get(path)
+    if settled is not None:
+        return replace(settled, identifier=identifier)
+
+    converted = plan.converted.get(path)
+    if converted is None:
+        try:
+            converted = convert_local_file(
+                path,
+                keep_original=options.keep_original,
+                mineru_device_mode=options.mineru_device_mode,
+                mineru_backend=options.mineru_backend,
+                mineru_model_source=options.mineru_model_source,
+            )
+        except IntakeError as error:
+            return AddOutcome(
+                identifier=identifier, status="failed", detail=str(error)
+            )
     return _finish_literature(
-        collection_dir, state, converted, identifier, options, entry=entry,
+        collection_dir,
+        state,
+        converted,
+        identifier,
+        options,
+        entry=entry,
         group=group,
     )
 
 
 def _finish_literature(
-    collection_dir: Path, state: _CorpusState, converted: Converted, identifier: str,
-    options: AddOptions, *, entry: Any, group: str | None = None,
+    collection_dir: Path,
+    state: _CorpusState,
+    converted: Converted,
+    identifier: str,
+    options: AddOptions,
+    *,
+    entry: Any,
+    group: str | None = None,
 ) -> AddOutcome:
     """Write a paper that came from a file or a plain URL rather than arXiv.
 
@@ -599,7 +888,9 @@ def _finish_literature(
     existing = _duplicate_by_checksum(state, converted)
     if existing is not None:
         return AddOutcome(
-            identifier=identifier, status="duplicate", document_id=existing,
+            identifier=identifier,
+            status="duplicate",
+            document_id=existing,
             detail="identical content is already in this collection",
         )
 
@@ -607,7 +898,10 @@ def _finish_literature(
         title = options.title or entry.title
         base_citekey = entry.citekey
         authors, year, doi, arxiv_id = (
-            entry.authors, entry.year, entry.doi, entry.arxiv_id
+            entry.authors,
+            entry.year,
+            entry.doi,
+            entry.arxiv_id,
         )
     else:
         title = options.title or converted.suggested_title or Path(identifier).stem
@@ -618,22 +912,32 @@ def _finish_literature(
         already = state.bib_identities.get(identity.lower()) if identity else None
         if already is not None:
             return AddOutcome(
-                identifier=identifier, status="duplicate", document_id=already,
+                identifier=identifier,
+                status="duplicate",
+                document_id=already,
                 detail=f"'{identity}' is already in this collection",
             )
 
     citekey = _resolve_citekey(state, base_citekey, options.citekey)
     if citekey in state.natural_keys:
         return AddOutcome(
-            identifier=identifier, status="duplicate",
+            identifier=identifier,
+            status="duplicate",
             document_id=state.natural_keys[citekey],
             detail=f"citekey '{citekey}' is already in this collection",
         )
 
     document_id, path = _write(
-        collection_dir, state, converted=converted, title=title, options=options,
+        collection_dir,
+        state,
+        converted=converted,
+        title=title,
+        options=options,
         blocks=literature_blocks(
-            citekey=citekey, authors=authors, year=year, doi=doi,
+            citekey=citekey,
+            authors=authors,
+            year=year,
+            doi=doi,
             arxiv_id=arxiv_id,
         ),
         group=_group_for(options, group or ""),
@@ -643,8 +947,13 @@ def _finish_literature(
         if identity:
             state.bib_identities[identity.lower()] = document_id
     return AddOutcome(
-        identifier=identifier, status="added", document_id=document_id, title=title,
-        path=path, via=converted.via, notice=_notice_for(title),
+        identifier=identifier,
+        status="added",
+        document_id=document_id,
+        title=title,
+        path=path,
+        via=converted.via,
+        notice=_notice_for(title),
     )
 
 
@@ -659,6 +968,7 @@ def add_docs(
     options: AddOptions,
     *,
     on_page: Callable[[str], None] | None = None,
+    on_batch: BatchProgress | None = None,
 ) -> list[AddOutcome]:
     """Add documentation, either a whole site or a single file.
 
@@ -683,6 +993,10 @@ def add_docs(
     resolved = resolve_inputs(identifiers, extra_file_types=options.extra_file_types)
     state = _CorpusState.load(collection_dir, "docs")
     outcomes: list[AddOutcome] = _skipped_outcomes(resolved)
+    plan = _plan_binaries(
+        (item.identifier for item in resolved.items), state, options,
+        on_batch=on_batch,
+    )
 
     for item in resolved.items:
         identifier = item.identifier
@@ -690,7 +1004,8 @@ def add_docs(
         if project_name is None:
             outcomes.append(
                 AddOutcome(
-                    identifier=identifier, status="failed",
+                    identifier=identifier,
+                    status="failed",
                     detail="--project is required: it names the group these pages live in.",
                 )
             )
@@ -701,30 +1016,42 @@ def add_docs(
             if not path.is_file():
                 outcomes.append(
                     AddOutcome(
-                        identifier=identifier, status="failed",
+                        identifier=identifier,
+                        status="failed",
                         detail=f"'{identifier}' is not an existing file or an http(s) URL.",
                     )
                 )
                 continue
-            try:
-                converted = convert_local_file(
-                    path,
-                    keep_original=options.keep_original,
-                    mineru_device_mode=options.mineru_device_mode,
-                    mineru_backend=options.mineru_backend,
-                    mineru_model_source=options.mineru_model_source,
-                )
-            except IntakeError as error:
-                outcomes.append(
-                    AddOutcome(identifier=identifier, status="failed", detail=str(error))
-                )
+            settled = plan.settled.get(path)
+            if settled is not None:
+                outcomes.append(replace(settled, identifier=identifier))
                 continue
+
+            converted = plan.converted.get(path)
+            if converted is None:
+                try:
+                    converted = convert_local_file(
+                        path,
+                        keep_original=options.keep_original,
+                        mineru_device_mode=options.mineru_device_mode,
+                        mineru_backend=options.mineru_backend,
+                        mineru_model_source=options.mineru_model_source,
+                    )
+                except IntakeError as error:
+                    outcomes.append(
+                        AddOutcome(
+                            identifier=identifier, status="failed", detail=str(error)
+                        )
+                    )
+                    continue
 
             existing = _duplicate_by_checksum(state, converted)
             if existing is not None:
                 outcomes.append(
                     AddOutcome(
-                        identifier=identifier, status="duplicate", document_id=existing,
+                        identifier=identifier,
+                        status="duplicate",
+                        document_id=existing,
                         detail="identical content is already in this collection",
                     )
                 )
@@ -733,15 +1060,23 @@ def add_docs(
             title = options.title or converted.suggested_title or path.stem
             page_name = path.stem
             document_id, written = _write(
-                collection_dir, state, converted=converted, title=title,
-                options=AddOptions(**{**options.__dict__, "group": project_name}),
+                collection_dir,
+                state,
+                converted=converted,
+                title=title,
+                options=options,
+                group=project_name,
                 blocks={"docs": {"project": project_name, "page": page_name}},
             )
             state.natural_keys[f"{project_name}/{page_name}"] = document_id
             outcomes.append(
                 AddOutcome(
-                    identifier=identifier, status="added", document_id=document_id,
-                    title=title, path=written, via=converted.via,
+                    identifier=identifier,
+                    status="added",
+                    document_id=document_id,
+                    title=title,
+                    path=written,
+                    via=converted.via,
                 )
             )
             continue
@@ -751,7 +1086,9 @@ def add_docs(
         failed = 0
         with httpx.Client(headers={"User-Agent": "boepie-docs-fetch"}) as client:
             discovery = probe_discovery_mode(client, identifier, 30)
-            version = fetch_version(client, identifier, 30) if discovery == "sphinx" else None
+            version = (
+                fetch_version(client, identifier, 30) if discovery == "sphinx" else None
+            )
 
             for page in iter_project_pages(client, project, delay=options.delay):
                 if page.markdown is None:
@@ -770,8 +1107,12 @@ def add_docs(
                     suggested_title=title,
                 )
                 document_id, _written = _write(
-                    collection_dir, state, converted=converted, title=title,
-                    options=AddOptions(**{**options.__dict__, "group": project_name}),
+                    collection_dir,
+                    state,
+                    converted=converted,
+                    title=title,
+                    options=options,
+                group=project_name,
                     blocks={
                         "docs": {
                             "project": project_name,
@@ -799,9 +1140,3 @@ def add_docs(
         )
     return outcomes
 
-
-ADDERS: dict[str, Callable[[Path, Sequence[str], AddOptions], list[AddOutcome]]] = {
-    "literature": add_literature,
-    "docs": add_docs,
-    "notes": add_notes,
-}

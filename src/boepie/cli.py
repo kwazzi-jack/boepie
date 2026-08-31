@@ -49,6 +49,7 @@ from boepie.config import (
     LITERATURE_DIR,
     LITERATURE_FETCH_DELAY,
     MINERU_BACKEND,
+    MINERU_BATCH_SIZE,
     MINERU_DEVICE_MODE,
     MINERU_MODEL_SOURCE,
     NOTES_DIR,
@@ -75,6 +76,7 @@ from boepie.corpus.add import (
 )
 from boepie.corpus.document import move_leaf_document, read_document
 from boepie.corpus.inputs import InputError
+from boepie.corpus.intake import IntakeError
 from boepie.corpus.layout import (
     full_title_filename,
     lookup_path,
@@ -779,20 +781,35 @@ def _build_add_options(**overrides) -> AddOptions:
         mineru_device_mode=MINERU_DEVICE_MODE,
         mineru_backend=MINERU_BACKEND,
         mineru_model_source=MINERU_MODEL_SOURCE,
+        mineru_batch_size=MINERU_BATCH_SIZE,
         **overrides,
+    )
+
+
+def _converting_with_mineru(documents: int, number: int, total: int) -> None:
+    """Say what MinerU is about to spend minutes on.
+
+    Per run rather than per document, because MinerU writes nothing until a
+    whole run has finished - there is no per-document moment to report.
+    """
+    run = f" (run {number} of {total})" if total > 1 else ""
+    display.info(
+        f"{documents} document(s) with MinerU{run} - this takes a few minutes",
+        lead="converting",
     )
 
 
 def _add_and_report(collection: str, adder: Callable[[], list[AddOutcome]]) -> None:
     """Run one `corpus add` and report it.
 
-    `InputError` is raised rather than collected as an outcome (an argument
-    naming nothing cannot be carried out at all), so it is caught here and
-    given click's own error wording instead of a traceback.
+    Both exceptions mean the batch as typed cannot be carried out at all - an
+    argument naming nothing, or a converter that is not installed - rather
+    than one identifier having failed, so they are caught here and given
+    click's own error wording instead of a traceback.
     """
     try:
         outcomes = adder()
-    except InputError as error:
+    except (InputError, IntakeError) as error:
         raise CliError(str(error)) from error
     _report_add(collection, outcomes)
 
@@ -894,7 +911,10 @@ def corpus_add_literature(
         title=title, group=group, keep_original=keep_original, citekey=citekey
     )
     _add_and_report(
-        "literature", lambda: add_literature(LITERATURE_DIR, identifiers, options)
+        "literature",
+        lambda: add_literature(
+            LITERATURE_DIR, identifiers, options, on_batch=_converting_with_mineru
+        ),
     )
 
 
@@ -924,7 +944,12 @@ def corpus_add_docs(
     options = _build_add_options(
         title=title, group=group, keep_original=keep_original, project=project
     )
-    _add_and_report("docs", lambda: add_docs(DOCS_DIR, identifiers, options))
+    _add_and_report(
+        "docs",
+        lambda: add_docs(
+            DOCS_DIR, identifiers, options, on_batch=_converting_with_mineru
+        ),
+    )
 
 
 @corpus_add.command("notes")
@@ -944,7 +969,12 @@ def corpus_add_notes(
     project's `.boepie/` bundle.
     """
     options = _build_add_options(title=title, group=group, keep_original=keep_original)
-    _add_and_report("notes", lambda: add_notes(NOTES_DIR, identifiers, options))
+    _add_and_report(
+        "notes",
+        lambda: add_notes(
+            NOTES_DIR, identifiers, options, on_batch=_converting_with_mineru
+        ),
+    )
 
 
 @corpus.command("remove")

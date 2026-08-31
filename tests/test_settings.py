@@ -323,7 +323,7 @@ def test_resolve_settings_reports_file_and_env_separately(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings.set_value("embedding.binding", "ollama")
-    monkeypatch.setenv("BOEPIE_MINERU_BACKEND", "vlm")
+    monkeypatch.setenv("BOEPIE_MINERU_BACKEND", "vlm-engine")
 
     by_key = {item.key: item for item in settings.resolve_settings()}
 

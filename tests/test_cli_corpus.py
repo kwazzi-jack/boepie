@@ -953,7 +953,7 @@ def test_corpus_add_reports_a_skip_without_failing_the_batch(
 ) -> None:
     from boepie.corpus.add import AddOutcome
 
-    def fake_add_notes(collection_dir, identifiers, options):
+    def fake_add_notes(collection_dir, identifiers, options, **_kwargs):
         return [
             AddOutcome(identifier="kept.md", status="added", title="Kept", document_id="aB3dE9fGhI"),
             AddOutcome(identifier="logo.png", status="skipped", detail="unsupported file type"),
@@ -973,7 +973,7 @@ def test_corpus_add_still_fails_the_batch_on_a_real_failure(
 ) -> None:
     from boepie.corpus.add import AddOutcome
 
-    def fake_add_notes(collection_dir, identifiers, options):
+    def fake_add_notes(collection_dir, identifiers, options, **_kwargs):
         return [AddOutcome(identifier="gone.md", status="failed", detail="does not exist")]
 
     monkeypatch.setattr(cli, "add_notes", fake_add_notes)

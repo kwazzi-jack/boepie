@@ -238,6 +238,7 @@ MINERU_BACKEND: str = _SETTINGS.mineru.backend
 # MINERU_MODEL_SOURCE env var. 'auto' means the variable is left unset:
 # MinerU rejects the literal string and asks for the variable to be absent.
 MINERU_MODEL_SOURCE: str = _SETTINGS.mineru.model_source
+MINERU_BATCH_SIZE: int = _SETTINGS.mineru.batch_size
 
 # ---------------------------------------------------------------------------
 # Ingestion: `corpus add notes`'s collection classification

@@ -225,9 +225,56 @@ _MINERU_MISSING = (
     "Or convert the file yourself and add the resulting Markdown instead."
 )
 
+# The formats that have to go through MinerU rather than being read as text.
+MINERU_FORMATS: frozenset[SourceFormat] = frozenset(_MINERU_SUFFIXES.values())
+
 
 def mineru_available() -> bool:
     return shutil.which("mineru") is not None
+
+
+def require_mineru(paths: Sequence[Path]) -> None:
+    """Fail now if MinerU is needed and missing, rather than once per file.
+
+    A folder of fifty PDFs would otherwise produce fifty copies of the same
+    install instructions, and would produce them one at a time over the course
+    of a run that cannot succeed.
+    """
+    if not paths or mineru_available():
+        return
+    formats = sorted({path.suffix.lstrip(".").upper() for path in paths})
+    raise IntakeError(_MINERU_MISSING.format(format="/".join(formats)))
+
+
+def mineru_no_markdown(path: Path, reason: str | None) -> str:
+    """Why one document came back from MinerU with nothing.
+
+    `reason` is MinerU's own wording when the process itself failed; without
+    one the document simply produced no output, which is what an empty,
+    encrypted or unsupported file looks like from here.
+    """
+    if reason:
+        return f"mineru failed to convert '{path.name}': {reason}"
+    return (
+        f"mineru produced no markdown for '{path.name}'. "
+        f"The file may be empty, encrypted, or an unsupported variant."
+    )
+
+
+@dataclass(frozen=True)
+class MineruResult:
+    """What one MinerU process produced.
+
+    Reported per document rather than as one pass or fail: MinerU converts
+    the documents it can and records the rest in its own task log, so a path
+    missing from `markdown` is that document's failure alone and must not
+    cost the others. `failure_reason` is MinerU's wording when the process
+    exited non-zero, which is the only context a bare "produced nothing"
+    would otherwise lack.
+    """
+
+    markdown: dict[Path, str]
+    failure_reason: str | None = None
 
 
 # Settings whose value is "auto" mean "let MinerU decide", which MinerU
@@ -281,49 +328,96 @@ def _mineru_failure_reason(completed: subprocess.CompletedProcess[str]) -> str:
     return lines[-1].strip() if lines else f"exit code {completed.returncode}"
 
 
+# How much of the original filename a staged copy keeps. The index prefix is
+# what makes the name unique; the rest is there only so MinerU's own error
+# output names something the user recognises, and truncating is easier than
+# discovering each filesystem's own limit.
+_STAGED_STEM_LIMIT = 100
+
+
+def _stage_for_mineru(paths: Sequence[Path], staged_dir: Path) -> dict[str, Path]:
+    """Present a batch to MinerU as one directory, and map its output back.
+
+    `-p` takes a single path, so several documents can only be handed over as
+    a directory. They are renamed on the way in because MinerU names its
+    output directory after the input's stem: two `README.pdf` from different
+    folders would otherwise write to the same place and one would silently
+    win. Hard-linked where the filesystem allows it, since the alternative is
+    copying every source into the temporary directory.
+    """
+    staged: dict[str, Path] = {}
+    for index, path in enumerate(paths):
+        target = staged_dir / (
+            f"{index:04d}-{path.stem[:_STAGED_STEM_LIMIT]}{path.suffix.lower()}"
+        )
+        try:
+            os.link(path, target)
+        except OSError:
+            # A different filesystem, or one without hard links.
+            shutil.copy2(path, target)
+        staged[target.stem] = path
+    return staged
+
+
 def convert_with_mineru(
-    path: Path, source_format: SourceFormat, *, device_mode: str, backend: str,
-    model_source: str,
-) -> str:
-    """Convert a binary document to Markdown with MinerU.
+    paths: Sequence[Path], *, device_mode: str, backend: str, model_source: str,
+) -> MineruResult:
+    """Convert binary documents to Markdown with MinerU, in one process.
+
+    Every path shares one invocation, and that is the whole point of taking a
+    sequence: MinerU spends around twenty seconds loading its model stack
+    before it converts anything, so a process per document pays that toll
+    every time. Measured on a 19-page paper: 41s for one document alone
+    against 88s for four in one call.
+
+    The caller decides how large a run is - see `boepie.corpus.add` - because
+    MinerU writes nothing until the whole run finishes, so a run is also the
+    unit of progress and the unit lost to an interruption.
 
     Settings come from `boepie.config` (the `mineru` section) and are passed
     the way MinerU itself expects them: the device and model source as
     environment variables, the backend as a flag.
     """
-    if not mineru_available():
-        raise IntakeError(_MINERU_MISSING.format(format=source_format.upper()))
+    if not paths:
+        return MineruResult(markdown={})
+    require_mineru(paths)
 
     with tempfile.TemporaryDirectory(prefix="boepie-mineru-") as tmp_name:
-        output_dir = Path(tmp_name)
+        staged_dir = Path(tmp_name) / "input"
+        output_dir = Path(tmp_name) / "output"
+        staged_dir.mkdir()
+        output_dir.mkdir()
+        staged = _stage_for_mineru(paths, staged_dir)
+
         environment = _mineru_environment(
             device_mode=device_mode, model_source=model_source
         )
         try:
             completed = subprocess.run(
-                ["mineru", "-p", str(path), "-o", str(output_dir), "-b", backend],
+                ["mineru", "-p", str(staged_dir), "-o", str(output_dir), "-b", backend],
                 capture_output=True, text=True, env=environment, check=False,
             )
         except OSError as error:
             raise IntakeError(f"could not run mineru: {error}") from error
 
-        if completed.returncode != 0:
-            raise IntakeError(
-                f"mineru failed to convert '{path.name}': "
-                f"{_mineru_failure_reason(completed)}"
-            )
+        markdown: dict[Path, str] = {}
+        for stem, original in staged.items():
+            # MinerU nests each document's output under a directory named
+            # after its input stem, at a depth that varies by version and
+            # backend, so the markdown is found by searching that directory
+            # rather than by a hardcoded path.
+            produced = sorted((output_dir / stem).rglob("*.md"))
+            if not produced:
+                continue
+            largest = max(produced, key=lambda candidate: candidate.stat().st_size)
+            markdown[original] = largest.read_text(encoding="utf-8", errors="replace")
 
-        # MinerU nests its output under a per-document directory whose exact
-        # depth varies by version and backend, so the markdown is located by
-        # search rather than by a hardcoded path.
-        markdown_files = sorted(output_dir.rglob("*.md"))
-        if not markdown_files:
-            raise IntakeError(
-                f"mineru produced no markdown for '{path.name}'. "
-                f"The file may be empty, encrypted, or an unsupported variant."
-            )
-        largest = max(markdown_files, key=lambda candidate: candidate.stat().st_size)
-        return largest.read_text(encoding="utf-8", errors="replace")
+        reason = (
+            _mineru_failure_reason(completed) if completed.returncode != 0 else None
+        )
+        if not markdown and reason is not None:
+            raise IntakeError(f"mineru failed: {reason}")
+        return MineruResult(markdown=markdown, failure_reason=reason)
 
 
 # ---------------------------------------------------------------------------
@@ -373,17 +467,29 @@ def html_title(html: str) -> str | None:
 def convert_local_file(
     path: Path, *, keep_original: bool, mineru_device_mode: str,
     mineru_backend: str, mineru_model_source: str,
+    prepared_markdown: str | None = None,
 ) -> Converted:
-    """Convert one local file of any supported format into Markdown."""
+    """Convert one local file of any supported format into Markdown.
+
+    `prepared_markdown` is MinerU output an earlier batch already produced for
+    this path (see `boepie.corpus.add._plan_binaries`). Supplying it is what
+    keeps a batched conversion from being repeated a document at a time; it is
+    ignored for the formats MinerU never sees.
+    """
     source_format = detect_format(path)
     raw = path.read_bytes()
     checksum = sha256_of(raw)
 
-    if source_format in ("pdf", "docx", "pptx", "xlsx"):
-        markdown = convert_with_mineru(
-            path, source_format, device_mode=mineru_device_mode,
-            backend=mineru_backend, model_source=mineru_model_source,
-        )
+    if source_format in MINERU_FORMATS:
+        markdown = prepared_markdown
+        if markdown is None:
+            result = convert_with_mineru(
+                [path], device_mode=mineru_device_mode,
+                backend=mineru_backend, model_source=mineru_model_source,
+            )
+            markdown = result.markdown.get(path)
+            if markdown is None:
+                raise IntakeError(mineru_no_markdown(path, result.failure_reason))
         via: ConversionVia = "mineru"
     elif source_format == "html":
         markdown = convert_html(read_text_file(path))

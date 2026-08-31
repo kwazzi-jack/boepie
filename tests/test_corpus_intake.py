@@ -9,6 +9,7 @@ file as UTF-8, so a PDF surfaced a `UnicodeDecodeError` to the user.
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -18,6 +19,7 @@ from boepie.corpus.intake import (
     _mineru_failure_reason,
     convert_local_file,
     convert_html,
+    convert_with_mineru,
     detect_format,
     looks_like_url,
     read_text_file,
@@ -252,3 +254,135 @@ def test_docx_derived_title_reaches_the_filename_cleanly(tmp_path):
     title = title_from_markdown("# **Array Configuration Memo**\n", "fallback")
 
     assert full_title_filename(title) == "Array Configuration Memo.md"
+
+
+# ---------------------------------------------------------------------------
+# Handing MinerU a whole batch
+# ---------------------------------------------------------------------------
+#
+# `-p` takes one path, so several documents can only be presented as a
+# directory. MinerU is stubbed here: what is being pinned is how boepie stages
+# the inputs and finds each document's output again, not the conversion.
+
+
+def _fake_mineru(monkeypatch, *, produce=lambda stem: f"# {stem}\n", returncode=0):
+    """Stand in for the MinerU process, writing its own output layout."""
+    staged: list[list[str]] = []
+
+    def fake_run(argv, **kwargs):
+        input_dir = Path(argv[argv.index("-p") + 1])
+        output_dir = Path(argv[argv.index("-o") + 1])
+        staged.append(sorted(path.name for path in input_dir.iterdir()))
+        for source in input_dir.iterdir():
+            body = produce(source.stem)
+            if body is None:
+                continue
+            written = output_dir / source.stem / "auto"
+            written.mkdir(parents=True)
+            (written / f"{source.stem}.md").write_text(body, encoding="utf-8")
+        return subprocess.CompletedProcess(args=argv, returncode=returncode, stdout="", stderr="")
+
+    monkeypatch.setattr("boepie.corpus.intake.mineru_available", lambda: True)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    return staged
+
+
+def _batch(paths):
+    return convert_with_mineru(
+        paths, device_mode="auto", backend="pipeline", model_source="auto"
+    )
+
+
+def test_a_batch_maps_each_document_back_to_the_path_that_was_asked_for(
+    tmp_path, monkeypatch
+):
+    _fake_mineru(monkeypatch)
+    first = tmp_path / "one.pdf"
+    second = tmp_path / "two.pdf"
+    first.write_bytes(b"%PDF one")
+    second.write_bytes(b"%PDF two")
+
+    result = _batch([first, second])
+
+    assert set(result.markdown) == {first, second}
+    assert result.failure_reason is None
+
+
+def test_same_named_documents_from_different_folders_do_not_collide(
+    tmp_path, monkeypatch
+):
+    """MinerU names its output directory after the input's stem, so two
+    `README.pdf` handed over unrenamed would write to the same place and one
+    would silently win."""
+    staged = _fake_mineru(monkeypatch)
+    paths = []
+    for folder in ("gains", "solver"):
+        (tmp_path / folder).mkdir()
+        path = tmp_path / folder / "README.pdf"
+        path.write_bytes(f"%PDF {folder}".encode())
+        paths.append(path)
+
+    result = _batch(paths)
+
+    assert staged == [["0000-README.pdf", "0001-README.pdf"]]
+    assert set(result.markdown) == set(paths)
+    assert result.markdown[paths[0]] != result.markdown[paths[1]]
+
+
+def test_a_document_the_run_produced_nothing_for_is_simply_absent(
+    tmp_path, monkeypatch
+):
+    """Reported per document, not as one pass or fail for the whole run: the
+    others converted fine and must not be thrown away with it."""
+    _fake_mineru(monkeypatch, produce=lambda stem: None if stem.endswith("two") else "# ok\n")
+    first = tmp_path / "one.pdf"
+    second = tmp_path / "two.pdf"
+    first.write_bytes(b"%PDF one")
+    second.write_bytes(b"%PDF two")
+
+    result = _batch([first, second])
+
+    assert set(result.markdown) == {first}
+
+
+def test_a_run_that_failed_but_still_converted_something_keeps_it(
+    tmp_path, monkeypatch
+):
+    _fake_mineru(
+        monkeypatch,
+        produce=lambda stem: None if stem.endswith("two") else "# ok\n",
+        returncode=1,
+    )
+    first = tmp_path / "one.pdf"
+    second = tmp_path / "two.pdf"
+    first.write_bytes(b"%PDF one")
+    second.write_bytes(b"%PDF two")
+
+    result = _batch([first, second])
+
+    assert set(result.markdown) == {first}
+    assert result.failure_reason == "exit code 1"
+
+
+def test_a_run_that_failed_and_produced_nothing_raises(tmp_path, monkeypatch):
+    _fake_mineru(monkeypatch, produce=lambda stem: None, returncode=1)
+    source = tmp_path / "one.pdf"
+    source.write_bytes(b"%PDF one")
+
+    with pytest.raises(IntakeError, match="mineru failed"):
+        _batch([source])
+
+
+def test_a_single_file_conversion_still_goes_through_the_batch_call(
+    tmp_path, monkeypatch
+):
+    """One document is a batch of one - there is no second code path to drift."""
+    _fake_mineru(monkeypatch)
+    source = tmp_path / "paper.pdf"
+    source.write_bytes(b"%PDF one")
+
+    converted = _convert(source)
+
+    assert converted.via == "mineru"
+    assert converted.format == "pdf"
+    assert converted.markdown.startswith("# 0000-paper")

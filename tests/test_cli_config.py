@@ -181,12 +181,12 @@ def test_config_get_prints_the_resolved_value(runner: CliRunner) -> None:
 def test_config_get_source_reports_the_layer(
     runner: CliRunner, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("BOEPIE_MINERU_BACKEND", "vlm")
+    monkeypatch.setenv("BOEPIE_MINERU_BACKEND", "vlm-engine")
 
     result = runner.invoke(cli.cli, ["config", "get", "mineru.backend", "--source"])
 
     assert result.exit_code == 0, result.output
-    assert result.output.strip() == "vlm (BOEPIE_MINERU_BACKEND)"
+    assert result.output.strip() == "vlm-engine (BOEPIE_MINERU_BACKEND)"
 
 
 def test_config_get_rejects_an_unknown_key(runner: CliRunner) -> None:
