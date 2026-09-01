@@ -18,6 +18,7 @@ import re
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 import httpx
 
@@ -38,6 +39,25 @@ _LEGACY_ARXIV = re.compile(
 # A DOI is "10." followed by a registrant code, a slash, and a suffix that
 # runs to the end of the token.
 _DOI = re.compile(r"(10\.\d{4,9}/[^\s\"'<>]+)")
+
+# An ADS bibcode: 19 characters, fixed-width, dot-padded. It is the
+# astronomy-native identifier and the answer for anything older than arXiv -
+# a 1974 paper has no preprint id and often no DOI either, but it always has
+# a bibcode, printed on the scan by ADS itself.
+#
+#     YYYY  JJJJJ  VVVV  M  PPPP  A
+#     year  journal volume qualifier page first-author initial
+#     1974  A&AS.  ..15  .  .417  H
+#
+# The qualifier stays letters-or-dot rather than allowing digits: that costs
+# only the `2020arXiv200101234S` eprint form, which carries an arXiv id we
+# would rather match anyway, and it keeps the pattern from matching arbitrary
+# 19-character runs of text. Bounded by a lookaround rather than `\b`, since
+# a bibcode both contains and may abut a dot.
+_ADS_BIBCODE = re.compile(
+    r"(?<![\w.])((?:19|20)\d{2}[A-Za-z0-9&.]{5}[0-9.]{4}[A-Za-z.][0-9.]{4}[A-Za-z])"
+    r"(?![\w.])"
+)
 
 _ARXIV_HOSTS = ("arxiv.org", "ar5iv.labs.arxiv.org", "ar5iv.org", "browse.arxiv.org")
 
@@ -112,6 +132,18 @@ def arxiv_id_if_reference(identifier: str) -> str | None:
         if match is not None:
             return match.group(1)
     return None
+
+
+def normalize_bibcode(identifier: str) -> str | None:
+    """`identifier` as an ADS bibcode, or None.
+
+    Recorded but never resolved: turning a bibcode into bibliographic
+    metadata needs the ADS API and an API key, which boepie deliberately does
+    not ask anyone for. Its value here is identity - it gives a pre-arXiv
+    paper something to be deduplicated on.
+    """
+    match = _ADS_BIBCODE.search(identifier.strip())
+    return match.group(1) if match is not None else None
 
 
 def normalize_doi(identifier: str) -> str | None:
@@ -241,3 +273,53 @@ def resolve_doi_to_arxiv(doi: str) -> str | None:
     if id_element is None or not id_element.text:
         return None
     return normalize_arxiv_id(id_element.text)
+
+
+# ---------------------------------------------------------------------------
+# Recovering a paper's own identifier from its front page
+# ---------------------------------------------------------------------------
+
+
+type IdentifierKind = Literal["arxiv", "doi", "bibcode"]
+
+
+@dataclass(frozen=True)
+class PaperIdentifier:
+    """A bibliographic identifier read off a paper's own first page.
+
+    The point of finding one is that a local PDF otherwise has no identity at
+    all: its citekey has to be derived from its title, and duplicate
+    detection - which leans on `bib.arxiv_id` / `bib.doi` - has nothing to
+    compare. See `boepie.corpus.intake.front_page_text` for where the text
+    comes from, and why it cannot be read out of the converted Markdown.
+    """
+
+    kind: IdentifierKind
+    value: str
+
+
+def find_paper_identifier(text: str) -> PaperIdentifier | None:
+    """The first identifier in `text`, preferring the most useful kind.
+
+    arXiv id, then DOI, then ADS bibcode - the order of how much each one can
+    be turned into. An arXiv id resolves to full metadata over a public API
+    with no key; a DOI may resolve to an arXiv preprint and otherwise stands
+    on its own; a bibcode is identity only.
+
+    Whole-text search rather than a whole-string match, because this is
+    reading a page, not an argument. That is also why the caller hands over
+    only the first page: a bibliography would offer up dozens of other
+    people's identifiers, every one of them a wrong answer.
+    """
+    if not text.strip():
+        return None
+    arxiv_id = normalize_arxiv_id(text)
+    if arxiv_id is not None:
+        return PaperIdentifier(kind="arxiv", value=arxiv_id)
+    doi = normalize_doi(text)
+    if doi is not None:
+        return PaperIdentifier(kind="doi", value=doi)
+    bibcode = normalize_bibcode(text)
+    if bibcode is not None:
+        return PaperIdentifier(kind="bibcode", value=bibcode)
+    return None

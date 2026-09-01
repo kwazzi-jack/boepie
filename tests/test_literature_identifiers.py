@@ -12,9 +12,12 @@ from __future__ import annotations
 import pytest
 
 from boepie.literature.identifiers import (
+    PaperIdentifier,
     arxiv_id_if_reference,
+    find_paper_identifier,
     looks_like_bibtex,
     normalize_arxiv_id,
+    normalize_bibcode,
     normalize_doi,
     parse_bibtex,
 )
@@ -175,3 +178,79 @@ def test_a_filename_merely_containing_an_arxiv_id_is_not_a_reference(
 
 def test_the_legacy_form_survives_the_stricter_reading() -> None:
     assert arxiv_id_if_reference("astro-ph/0601234") == "astro-ph/0601234"
+
+
+# ---------------------------------------------------------------------------
+# ADS bibcodes and front-page identification
+# ---------------------------------------------------------------------------
+#
+# A bibcode is the astronomy-native identifier and the only one a pre-arXiv
+# paper reliably has. It is recorded, never resolved: turning one into
+# metadata needs the ADS API and a key.
+
+
+@pytest.mark.parametrize(
+    "bibcode",
+    [
+        "2011A&A...527A.106S",
+        "2018MNRAS.478.2399K",
+        "1974A&AS...15..417H",
+        "2004ApJS..154...25R",
+        "1998AJ....116.1009R",
+        "2019ApJ...875L...1E",
+    ],
+)
+def test_a_real_bibcode_is_recognised(bibcode: str) -> None:
+    assert normalize_bibcode(bibcode) == bibcode
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "10.1093/mnras/sty1221",
+        "1805.03410",
+        "2018MNRAS",
+        "abcdefghijklmnopqrs",
+        "2018MNRAS.478.2399KX",
+    ],
+)
+def test_a_lookalike_is_not_read_as_a_bibcode(text: str) -> None:
+    """The pattern is fixed-width and searched inside page text, so precision
+    matters more than reach - a wrong identifier is worse than no identifier."""
+    assert normalize_bibcode(text) is None
+
+
+def test_a_bibcode_is_found_inside_surrounding_text() -> None:
+    assert (
+        normalize_bibcode("Bibcode: 1974A&AS...15..417H  Provided by SAO/NASA")
+        == "1974A&AS...15..417H"
+    )
+
+
+def test_an_arxiv_stamp_is_preferred_over_a_doi_and_a_bibcode() -> None:
+    """Ordered by how much each can be turned into: an arXiv id resolves to
+    full metadata over a keyless public API, a DOI may resolve to a preprint,
+    a bibcode is identity only."""
+    page = (
+        "arXiv:1805.03410v2 [astro-ph.IM] 15 May 2018\n"
+        "MNRAS 478, 2399 (2018)  doi:10.1093/mnras/sty1221\n"
+        "2018MNRAS.478.2399K\n"
+    )
+
+    assert find_paper_identifier(page) == PaperIdentifier(
+        kind="arxiv", value="1805.03410"
+    )
+
+
+def test_a_doi_is_preferred_over_a_bibcode() -> None:
+    page = "2011A&A...527A.106S\ndoi:10.1051/0004-6361/201015249\n"
+
+    assert find_paper_identifier(page) == PaperIdentifier(
+        kind="doi", value="10.1051/0004-6361/201015249"
+    )
+
+
+def test_a_page_with_no_identifier_yields_none() -> None:
+    """The honest common case: a scan, a memo, a book chapter."""
+    assert find_paper_identifier("Accelerated C++\nAndrew Koenig\n") is None
+    assert find_paper_identifier("") is None

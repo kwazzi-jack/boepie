@@ -26,8 +26,9 @@ import shutil
 import subprocess
 import tempfile
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse
 
 import httpx
@@ -261,6 +262,102 @@ def mineru_no_markdown(path: Path, reason: str | None) -> str:
     )
 
 
+# Block kinds MinerU classifies as page furniture rather than body text.
+# These are exactly what the rendered Markdown throws away, and exactly where
+# a paper stamps its own identity: `arXiv:1805.03410v2 [astro-ph.IM]` arrives
+# as `page_aside_text`, a journal DOI as a `page_footer`, an ADS bibcode on a
+# scanned paper as a `page_header`.
+_FURNITURE_TYPES = frozenset({
+    "page_header", "page_footer", "page_footnote", "page_aside_text",
+    "page_number",
+})
+
+
+def _v2_block_text(block: dict[str, Any]) -> str:
+    """The plain text of one v2 content block, whatever kind it is.
+
+    v2 nests a block's pieces under a key named after the block's own type
+    (`{"type": "page_header", "content": {"page_header_content": [...]}}`),
+    so the key has to be built from the type rather than looked up by name.
+    """
+    kind = str(block.get("type", ""))
+    content = block.get("content")
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, dict):
+        return ""
+    pieces = content.get(f"{kind}_content")
+    if not isinstance(pieces, list):
+        return ""
+    return " ".join(
+        str(piece.get("content", ""))
+        for piece in pieces
+        if isinstance(piece, dict)
+    )
+
+
+def _front_page_of_v2(pages: list[Any]) -> str:
+    """First-page text from a `_content_list_v2.json`, furniture first."""
+    furniture: list[str] = []
+    body: list[str] = []
+    for block in pages[0] if pages and isinstance(pages[0], list) else []:
+        if not isinstance(block, dict):
+            continue
+        text = _v2_block_text(block)
+        if not text:
+            continue
+        target = furniture if block.get("type") in _FURNITURE_TYPES else body
+        target.append(text)
+    return "\n".join(furniture + body)
+
+
+def _front_page_of_v1(blocks: list[Any]) -> str:
+    """First-page text from the older flat `_content_list.json`.
+
+    v1 has no notion of furniture - every block is `text` or `image` with a
+    `page_idx` - so the ordering v2 allows is not available here. It still
+    carries the aside the Markdown drops, which is the part that matters.
+    """
+    return "\n".join(
+        str(block.get("text", ""))
+        for block in blocks
+        if isinstance(block, dict)
+        and block.get("page_idx") == 0
+        and block.get("text")
+    )
+
+
+def front_page_text(markdown_path: Path) -> str:
+    """Everything MinerU read off page one, including what it did not render.
+
+    A paper's own identifier is systematically *absent* from the converted
+    Markdown - verified on real conversions, `grep -c arxiv` is 0 - because
+    MinerU classifies the `arXiv:...` stamp as page furniture and furniture is
+    not body text. It survives in the content list beside the Markdown, which
+    is the only reason a local PDF can be identified at all.
+
+    Only page one. A bibliography offers dozens of other people's identifiers
+    and every one of them is a wrong answer, so the search is confined to the
+    page where a paper states its own.
+    """
+    for suffix in ("_content_list_v2.json", "_content_list.json"):
+        path = markdown_path.with_name(f"{markdown_path.stem}{suffix}")
+        if not path.is_file():
+            continue
+        try:
+            parsed = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(parsed, list):
+            continue
+        return (
+            _front_page_of_v2(parsed)
+            if suffix.endswith("_v2.json")
+            else _front_page_of_v1(parsed)
+        )
+    return ""
+
+
 @dataclass(frozen=True)
 class MineruResult:
     """What one MinerU process produced.
@@ -274,6 +371,10 @@ class MineruResult:
     """
 
     markdown: dict[Path, str]
+    # Page-one text per document, furniture included. Carried out of the
+    # temporary directory because that is the only place it exists: the
+    # content list is discarded with the run, and the Markdown never had it.
+    front_page: dict[Path, str] = field(default_factory=dict)
     failure_reason: str | None = None
 
 
@@ -401,6 +502,7 @@ def convert_with_mineru(
             raise IntakeError(f"could not run mineru: {error}") from error
 
         markdown: dict[Path, str] = {}
+        front_page: dict[Path, str] = {}
         for stem, original in staged.items():
             # MinerU nests each document's output under a directory named
             # after its input stem, at a depth that varies by version and
@@ -411,13 +513,16 @@ def convert_with_mineru(
                 continue
             largest = max(produced, key=lambda candidate: candidate.stat().st_size)
             markdown[original] = largest.read_text(encoding="utf-8", errors="replace")
+            front_page[original] = front_page_text(largest)
 
         reason = (
             _mineru_failure_reason(completed) if completed.returncode != 0 else None
         )
         if not markdown and reason is not None:
             raise IntakeError(f"mineru failed: {reason}")
-        return MineruResult(markdown=markdown, failure_reason=reason)
+        return MineruResult(
+            markdown=markdown, front_page=front_page, failure_reason=reason
+        )
 
 
 # ---------------------------------------------------------------------------

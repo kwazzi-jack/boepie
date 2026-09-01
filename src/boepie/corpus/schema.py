@@ -107,6 +107,10 @@ class Bibliography(BaseModel):
     year: str | None = None
     doi: str | None = None
     arxiv_id: str | None = None
+    # ADS bibcode. The astronomy-native identifier, and the only one a
+    # pre-arXiv paper reliably has - recorded so such a paper can still be
+    # deduplicated, never resolved (that needs the ADS API and a key).
+    bibcode: str | None = None
 
 
 class LiteratureDocument(CorpusDocument):
@@ -170,6 +174,7 @@ def dump_frontmatter(document: CorpusDocument) -> dict[str, Any]:
 def literature_blocks(
     *, citekey: str, authors: str = "", year: str = "",
     doi: str | None = None, arxiv_id: str | None = None,
+    bibcode: str | None = None,
 ) -> dict[str, Any]:
     """The `bib:` block for one paper, with empty fields omitted.
 
@@ -187,6 +192,8 @@ def literature_blocks(
         bib["doi"] = doi
     if arxiv_id:
         bib["arxiv_id"] = arxiv_id
+    if bibcode:
+        bib["bibcode"] = bibcode
     return {"bib": bib}
 
 

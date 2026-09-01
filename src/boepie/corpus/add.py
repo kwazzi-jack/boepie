@@ -139,7 +139,7 @@ class _CorpusState:
                 state.checksums[checksum] = document.id
             if document.natural_key:
                 state.natural_keys[document.natural_key] = document.id
-            for path in ("bib.arxiv_id", "bib.doi"):
+            for path in ("bib.arxiv_id", "bib.doi", "bib.bibcode"):
                 identity = lookup_path(document.frontmatter, path)
                 if isinstance(identity, str) and identity:
                     state.bib_identities[identity.lower()] = document.id
@@ -251,6 +251,10 @@ class _BinaryPlan:
     # could not convert. Carries no identifier of its own - the loop knows how
     # the user named the file, which for a `.bib` entry is not the path.
     settled: dict[Path, AddOutcome] = field(default_factory=dict)
+    # Page-one text per document, furniture included. The one place a local
+    # PDF states its own arXiv id, DOI or bibcode; the converted Markdown
+    # drops it (see `intake.front_page_text`).
+    front_page: dict[Path, str] = field(default_factory=dict)
 
 
 def _binary_candidates(identifiers: Iterable[str]) -> list[Path]:
@@ -356,6 +360,7 @@ def _plan_binaries(
                 mineru_model_source=options.mineru_model_source,
                 prepared_markdown=markdown,
             )
+            plan.front_page[path] = result.front_page.get(path, "")
     return plan
 
 
@@ -826,6 +831,81 @@ def add_literature(
     return outcomes
 
 
+@dataclass(frozen=True)
+class _FrontPageFacts:
+    """What a paper's own first page established about it.
+
+    All fields empty is the honest common case - a scanned figure, a memo, a
+    PDF with no identifier anywhere - and the caller falls back to a
+    title-derived citekey exactly as before.
+    """
+
+    title: str = ""
+    authors: str = ""
+    year: str = ""
+    doi: str | None = None
+    arxiv_id: str | None = None
+    bibcode: str | None = None
+
+
+def _identify_from_front_page(front_page: str) -> _FrontPageFacts:
+    """Read a paper's identity off its first page, resolving what it can.
+
+    Two steps, and only the first is local. Finding the identifier is a regex
+    over text MinerU already produced. Turning an arXiv id into authors and a
+    year is a request to arXiv's public API, which is what upgrades a citekey
+    from `paperRadioInterferometry` to `kenyonCubicalFast2018`.
+
+    A DOI is resolved only as far as an arXiv preprint, and a bibcode not at
+    all - resolving those needs Crossref metadata or an ADS key, neither of
+    which boepie asks anyone for. Recorded regardless, because identity is
+    what duplicate detection runs on even when metadata is unavailable.
+
+    Every network failure degrades to "identifier known, metadata not". The
+    identifier is the part that prevents the same paper landing twice, and it
+    is already in hand by then; refusing to add the document because arXiv was
+    unreachable would trade a small loss for a total one.
+    """
+    from boepie.literature.identifiers import find_paper_identifier, resolve_doi_to_arxiv
+
+    found = find_paper_identifier(front_page)
+    if found is None:
+        return _FrontPageFacts()
+    if found.kind == "bibcode":
+        return _FrontPageFacts(bibcode=found.value)
+
+    doi = found.value if found.kind == "doi" else None
+    arxiv_id = found.value if found.kind == "arxiv" else None
+    if arxiv_id is None:
+        try:
+            arxiv_id = resolve_doi_to_arxiv(found.value)
+        except httpx.HTTPError:
+            arxiv_id = None
+    if arxiv_id is None:
+        return _FrontPageFacts(doi=doi)
+
+    metadata = _arxiv_metadata(arxiv_id)
+    if metadata is None:
+        return _FrontPageFacts(doi=doi, arxiv_id=arxiv_id)
+    return _FrontPageFacts(
+        title=metadata["title"],
+        authors=metadata["authors"],
+        year=metadata["year"],
+        doi=doi,
+        arxiv_id=arxiv_id,
+    )
+
+
+def _arxiv_metadata(arxiv_id: str) -> dict[str, str] | None:
+    """arXiv's record for `arxiv_id`, or None if it cannot be had right now."""
+    from boepie.literature.fetch import lookup_arxiv_metadata
+
+    try:
+        return lookup_arxiv_metadata(arxiv_id)
+    except httpx.HTTPError:
+        return None
+
+
 def _add_literature_file(
     collection_dir: Path,
     state: _CorpusState,
@@ -863,6 +943,7 @@ def _add_literature_file(
         options,
         entry=entry,
         group=group,
+        front_page=plan.front_page.get(path, ""),
     )
 
 
@@ -875,13 +956,14 @@ def _finish_literature(
     *,
     entry: Any,
     group: str | None = None,
+    front_page: str = "",
 ) -> AddOutcome:
     """Write a paper that came from a file or a plain URL rather than arXiv.
 
-    A local PDF carries no bibliography of its own, so its citekey is derived
-    from whatever is available: a `.bib` entry when one pointed here, else the
-    document title. That is deliberately the user's problem to correct with
-    `--citekey` - guessing harder would be less predictable, not more.
+    Where its bibliographic identity comes from, in order: a `.bib` entry
+    when one pointed here, else whatever the paper states about itself on its
+    own first page (`front_page`), else nothing - in which case the citekey
+    is derived from the title and is the user's to correct with `--citekey`.
     """
     from boepie.literature.manifest import derive_citekey
 
@@ -894,6 +976,7 @@ def _finish_literature(
             detail="identical content is already in this collection",
         )
 
+    bibcode: str | None = None
     if entry is not None:
         title = options.title or entry.title
         base_citekey = entry.citekey
@@ -904,11 +987,17 @@ def _finish_literature(
             entry.arxiv_id,
         )
     else:
-        title = options.title or converted.suggested_title or Path(identifier).stem
-        base_citekey = derive_citekey("", "", title)
-        authors, year, doi, arxiv_id = "", "", None, None
+        found = _identify_from_front_page(front_page)
+        title = options.title or found.title or converted.suggested_title or Path(identifier).stem
+        authors, year = found.authors, found.year
+        doi, arxiv_id, bibcode = found.doi, found.arxiv_id, found.bibcode
+        base_citekey = (
+            derive_citekey(authors, year, title)
+            if authors or year
+            else derive_citekey("", "", title)
+        )
 
-    for identity in (arxiv_id, doi):
+    for identity in (arxiv_id, doi, bibcode):
         already = state.bib_identities.get(identity.lower()) if identity else None
         if already is not None:
             return AddOutcome(
@@ -939,11 +1028,12 @@ def _finish_literature(
             year=year,
             doi=doi,
             arxiv_id=arxiv_id,
+            bibcode=bibcode,
         ),
         group=_group_for(options, group or ""),
     )
     state.natural_keys[citekey] = document_id
-    for identity in (arxiv_id, doi):
+    for identity in (arxiv_id, doi, bibcode):
         if identity:
             state.bib_identities[identity.lower()] = document_id
     return AddOutcome(
