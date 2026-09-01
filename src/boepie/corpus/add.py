@@ -21,6 +21,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
+import time
 from pathlib import Path
 from typing import Any, Literal
 
@@ -70,12 +71,18 @@ class AddOptions:
     title: str | None = None
     group: str | None = None
     citekey: str | None = None
+    # An arXiv id, DOI or ADS bibcode supplied by hand for a document that
+    # does not state one on its own first page. The non-interactive form of
+    # "boepie asked you for an identifier".
+    identifier: str | None = None
     project: str | None = None
     keep_original: bool = False
     mineru_device_mode: str = "auto"
     mineru_backend: str = "pipeline"
     mineru_model_source: str = "auto"
     mineru_batch_size: int = 8
+    # Seconds between consecutive arXiv API calls (literature.fetch_delay).
+    arxiv_delay: float = 1.0
     # Extra suffixes a folder walk accepts (corpus.extra_file_types).
     extra_file_types: tuple[str, ...] = ()
     # Politeness delay between pages of a crawled docs site.
@@ -529,6 +536,7 @@ def _add_arxiv_paper(
             detail=f"arXiv:{arxiv_id} is already in this collection",
         )
 
+    _arxiv_courtesy_pause(options)
     try:
         metadata = lookup_arxiv_metadata(arxiv_id)
     except httpx.HTTPError as error:
@@ -831,6 +839,23 @@ def add_literature(
     return outcomes
 
 
+# When arXiv's API was last called from this process. A folder of fifty PDFs
+# is fifty metadata lookups, and firing those back to back is how an IP gets
+# throttled - `corpus fetch` has always spaced its requests (see
+# `corpus.reconcile`), and `add` now does the same. Module-level because the
+# thing being rate-limited is the process, not any one batch.
+_last_arxiv_call = 0.0
+
+
+def _arxiv_courtesy_pause(options: AddOptions) -> None:
+    """Wait out the remainder of `literature.fetch_delay` since the last call."""
+    global _last_arxiv_call
+    elapsed = time.monotonic() - _last_arxiv_call
+    if _last_arxiv_call and elapsed < options.arxiv_delay:
+        time.sleep(options.arxiv_delay - elapsed)
+    _last_arxiv_call = time.monotonic()
+
+
 @dataclass(frozen=True)
 class _FrontPageFacts:
     """What a paper's own first page established about it.
@@ -848,7 +873,30 @@ class _FrontPageFacts:
     bibcode: str | None = None
 
 
-def _identify_from_front_page(front_page: str) -> _FrontPageFacts:
+def _no_identity_message(identifier: str) -> str:
+    """Why a document cannot enter `literature`, and the two ways out.
+
+    A literature document without a real identifier is worse than no document:
+    its citekey cites nothing, and duplicate detection - which runs on
+    `bib.arxiv_id`/`bib.doi`/`bib.bibcode` - has nothing to compare, so the
+    same paper reached by another route lands a second time. Rather than
+    inventing a key from the title, `add` refuses and says what to do.
+
+    Notes is a real answer here, not a consolation prize: notes have no
+    natural key *by design*, so a document with no bibliographic identity is
+    exactly what that collection is for.
+    """
+    return (
+        f"no arXiv id, DOI or ADS bibcode found on its first page, so it has "
+        f"no bibliographic identity and cannot go to literature. Supply one "
+        f"with --identifier, or add it as a note instead: "
+        f"boepie corpus add notes '{identifier}'"
+    )
+
+
+def _identify_from_front_page(
+    front_page: str, options: AddOptions
+) -> _FrontPageFacts:
     """Read a paper's identity off its first page, resolving what it can.
 
     Two steps, and only the first is local. Finding the identifier is a regex
@@ -868,7 +916,10 @@ def _identify_from_front_page(front_page: str) -> _FrontPageFacts:
     """
     from boepie.literature.identifiers import find_paper_identifier, resolve_doi_to_arxiv
 
-    found = find_paper_identifier(front_page)
+    # An identifier the user supplied outranks the page: they are correcting
+    # something, and there is no reading of `--identifier` that means "unless
+    # the PDF disagrees".
+    found = find_paper_identifier(options.identifier or front_page)
     if found is None:
         return _FrontPageFacts()
     if found.kind == "bibcode":
@@ -884,6 +935,7 @@ def _identify_from_front_page(front_page: str) -> _FrontPageFacts:
     if arxiv_id is None:
         return _FrontPageFacts(doi=doi)
 
+    _arxiv_courtesy_pause(options)
     metadata = _arxiv_metadata(arxiv_id)
     if metadata is None:
         return _FrontPageFacts(doi=doi, arxiv_id=arxiv_id)
@@ -987,15 +1039,22 @@ def _finish_literature(
             entry.arxiv_id,
         )
     else:
-        found = _identify_from_front_page(front_page)
-        title = options.title or found.title or converted.suggested_title or Path(identifier).stem
+        found = _identify_from_front_page(front_page, options)
+        if not (found.arxiv_id or found.doi or found.bibcode):
+            return AddOutcome(
+                identifier=identifier,
+                status="failed",
+                detail=_no_identity_message(identifier),
+            )
+        title = (
+            options.title
+            or found.title
+            or converted.suggested_title
+            or Path(identifier).stem
+        )
         authors, year = found.authors, found.year
         doi, arxiv_id, bibcode = found.doi, found.arxiv_id, found.bibcode
-        base_citekey = (
-            derive_citekey(authors, year, title)
-            if authors or year
-            else derive_citekey("", "", title)
-        )
+        base_citekey = derive_citekey(authors, year, title)
 
     for identity in (arxiv_id, doi, bibcode):
         already = state.bib_identities.get(identity.lower()) if identity else None

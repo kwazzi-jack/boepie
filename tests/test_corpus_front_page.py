@@ -113,6 +113,16 @@ def test_a_malformed_content_list_is_not_an_error(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _options(**overrides) -> AddOptions:
+    """Add options with the arXiv courtesy delay turned off.
+
+    These tests are about identity, not politeness - the delay itself is
+    exercised at the bottom of this module. Set the way a user could rather
+    than by stubbing the pause out, so the real code path still runs.
+    """
+    return AddOptions(arxiv_delay=0, **overrides)
+
+
 _METADATA = {
     "title": "CubiCal - Fast radio interferometric calibration suite",
     "authors": "J. S. Kenyon and O. M. Smirnov",
@@ -169,7 +179,7 @@ def test_a_pdf_gets_a_real_citekey_from_its_own_arxiv_stamp(
     mineru(_ARXIV_ASIDE)
     corpus = tmp_path / "literature"
 
-    outcomes = add_literature(corpus, [_pdf(tmp_path)], AddOptions())
+    outcomes = add_literature(corpus, [_pdf(tmp_path)], _options())
 
     assert [outcome.status for outcome in outcomes] == ["added"]
     assert arxiv == ["1805.03410"]
@@ -186,9 +196,9 @@ def test_the_same_paper_by_pdf_and_by_arxiv_id_is_one_document(
     recovered `bib.arxiv_id` is the only thing that can catch this."""
     mineru(_ARXIV_ASIDE)
     corpus = tmp_path / "literature"
-    add_literature(corpus, [_pdf(tmp_path)], AddOptions())
+    add_literature(corpus, [_pdf(tmp_path)], _options())
 
-    outcomes = add_literature(corpus, ["1805.03410"], AddOptions())
+    outcomes = add_literature(corpus, ["1805.03410"], _options())
 
     assert [outcome.status for outcome in outcomes] == ["duplicate"]
 
@@ -204,7 +214,7 @@ def test_a_doi_on_the_page_is_recorded_even_when_it_resolves_to_nothing(
     )
     corpus = tmp_path / "literature"
 
-    add_literature(corpus, [_pdf(tmp_path)], AddOptions())
+    add_literature(corpus, [_pdf(tmp_path)], _options())
 
     assert lookup_path(_frontmatter(corpus), "bib.doi") == "10.1051/0004-6361/201015249"
 
@@ -217,27 +227,80 @@ def test_a_bibcode_is_recorded_and_never_resolved(
     mineru("Bibcode: 1974A&AS...15..417H\nAstron. Astrophys. Suppl. 15, 417")
     corpus = tmp_path / "literature"
 
-    add_literature(corpus, [_pdf(tmp_path)], AddOptions())
+    add_literature(corpus, [_pdf(tmp_path)], _options())
 
     assert lookup_path(_frontmatter(corpus), "bib.bibcode") == "1974A&AS...15..417H"
     assert arxiv == []
 
 
-def test_a_page_with_no_identifier_still_adds_with_a_title_derived_citekey(
+def test_a_paper_with_no_findable_identity_is_refused_not_invented(
     tmp_path: Path, mineru, arxiv: list[str]
 ) -> None:
-    """No identifier is a normal outcome, not a failure."""
+    """The rule that makes the rest of it hold: every literature document has
+    a real identifier. A title-derived key would cite nothing and would leave
+    duplicate detection with nothing to compare, so `add` refuses instead."""
     mineru("Accelerated C++\nAndrew Koenig and Barbara Moo\n")
     corpus = tmp_path / "literature"
 
-    outcomes = add_literature(corpus, [_pdf(tmp_path)], AddOptions())
+    outcomes = add_literature(corpus, [_pdf(tmp_path)], _options())
+
+    assert [outcome.status for outcome in outcomes] == ["failed"]
+    assert not list(corpus.rglob("*.md"))
+    assert arxiv == []
+
+
+def test_the_refusal_names_both_ways_forward(tmp_path: Path, mineru) -> None:
+    """Notes is a real answer, not a consolation prize: notes have no natural
+    key by design, so a document with no identity is what they are for."""
+    mineru("A memo with no identifier anywhere\n")
+
+    outcomes = add_literature(tmp_path / "literature", [_pdf(tmp_path)], _options())
+
+    detail = outcomes[0].detail or ""
+    assert "--identifier" in detail
+    assert "boepie corpus add notes" in detail
+
+
+def test_a_supplied_identifier_lets_an_unidentified_paper_in(
+    tmp_path: Path, mineru, arxiv: list[str]
+) -> None:
+    """The non-interactive form of being asked for one."""
+    mineru("A scan with nothing printed on it\n")
+    corpus = tmp_path / "literature"
+
+    outcomes = add_literature(
+        corpus, [_pdf(tmp_path)], _options(identifier="1805.03410")
+    )
 
     assert [outcome.status for outcome in outcomes] == ["added"]
-    frontmatter = _frontmatter(corpus)
-    assert lookup_path(frontmatter, "bib.citekey")
-    # Omitted entirely rather than written empty - `literature_blocks` drops
-    # what it does not know, so absence is the signal.
-    assert "arxiv_id" not in frontmatter["bib"]
+    assert lookup_path(_frontmatter(corpus), "bib.arxiv_id") == "1805.03410"
+
+
+def test_a_supplied_identifier_overrules_the_page(
+    tmp_path: Path, mineru, arxiv: list[str]
+) -> None:
+    """There is no reading of `--identifier` that means "unless the PDF
+    disagrees" - the user is correcting something."""
+    mineru(_ARXIV_ASIDE)
+    corpus = tmp_path / "literature"
+
+    add_literature(
+        corpus, [_pdf(tmp_path)], _options(identifier="arXiv:1101.1764")
+    )
+
+    assert lookup_path(_frontmatter(corpus), "bib.arxiv_id") == "1101.1764"
+
+
+def test_a_bibcode_supplied_by_hand_is_enough(tmp_path: Path, mineru, arxiv: list[str]) -> None:
+    mineru("A 1974 scan with no identifier the parser could find\n")
+    corpus = tmp_path / "literature"
+
+    outcomes = add_literature(
+        corpus, [_pdf(tmp_path)], _options(identifier="1974A&AS...15..417H")
+    )
+
+    assert [outcome.status for outcome in outcomes] == ["added"]
+    assert lookup_path(_frontmatter(corpus), "bib.bibcode") == "1974A&AS...15..417H"
     assert arxiv == []
 
 
@@ -255,7 +318,7 @@ def test_an_unreachable_arxiv_keeps_the_identifier_and_adds_anyway(
     monkeypatch.setattr("boepie.literature.fetch.lookup_arxiv_metadata", unreachable)
     corpus = tmp_path / "literature"
 
-    outcomes = add_literature(corpus, [_pdf(tmp_path)], AddOptions())
+    outcomes = add_literature(corpus, [_pdf(tmp_path)], _options())
 
     assert [outcome.status for outcome in outcomes] == ["added"]
     assert lookup_path(_frontmatter(corpus), "bib.arxiv_id") == "1805.03410"
@@ -280,6 +343,42 @@ def test_a_bib_entry_still_wins_over_the_page(
     )
     corpus = tmp_path / "literature"
 
-    add_literature(corpus, [str(bib)], AddOptions())
+    add_literature(corpus, [str(bib)], _options())
 
     assert lookup_path(_frontmatter(corpus), "bib.citekey") == "myOwnKey2018"
+
+
+# ---------------------------------------------------------------------------
+# Not hammering arXiv
+# ---------------------------------------------------------------------------
+
+
+def test_arxiv_courtesy_pause_spaces_consecutive_calls(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A folder of fifty PDFs is fifty metadata lookups, and firing those back
+    to back is how an IP gets throttled. `corpus fetch` has always spaced its
+    requests; `add` reaches the same API and now does too."""
+    from boepie.corpus import add as add_module
+
+    slept: list[float] = []
+    clock = iter([100.0, 100.0, 100.2, 100.2])
+    monkeypatch.setattr(add_module.time, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(add_module.time, "sleep", slept.append)
+    monkeypatch.setattr(add_module, "_last_arxiv_call", 0.0)
+
+    options = AddOptions(arxiv_delay=1.0)
+    add_module._arxiv_courtesy_pause(options)   # first call: nothing to wait for
+    add_module._arxiv_courtesy_pause(options)   # 0.2s later: wait the other 0.8
+
+    assert slept == [pytest.approx(0.8)]
+
+
+def test_the_first_arxiv_call_of_a_process_never_waits(monkeypatch: pytest.MonkeyPatch) -> None:
+    from boepie.corpus import add as add_module
+
+    slept: list[float] = []
+    monkeypatch.setattr(add_module.time, "sleep", slept.append)
+    monkeypatch.setattr(add_module, "_last_arxiv_call", 0.0)
+
+    add_module._arxiv_courtesy_pause(AddOptions(arxiv_delay=1.0))
+
+    assert slept == []

@@ -736,6 +736,7 @@ def _build_add_options(**overrides) -> AddOptions:
         mineru_backend=MINERU_BACKEND,
         mineru_model_source=MINERU_MODEL_SOURCE,
         mineru_batch_size=MINERU_BATCH_SIZE,
+        arxiv_delay=LITERATURE_FETCH_DELAY,
         **overrides,
     )
 
@@ -843,10 +844,18 @@ def corpus_add() -> None:
 @corpus_add.command("literature")
 @click.argument("identifiers", nargs=-1, required=True)
 @click.option("--citekey", default=None, help="Override the derived citekey.")
+@click.option(
+    "--identifier",
+    default=None,
+    help="An arXiv id, DOI or ADS bibcode for a document that does not state "
+    "one on its own first page. Names one paper, so it cannot be combined "
+    "with several inputs.",
+)
 @_add_options
 def corpus_add_literature(
     identifiers: tuple[str, ...],
     citekey: str | None,
+    identifier: str | None,
     title: str | None,
     group: str | None,
     keep_original: bool | None,
@@ -861,8 +870,18 @@ def corpus_add_literature(
     adding the `.bib` is the best-supported way to bring in your own library.
     PDFs and other documents are converted with MinerU.
     """
+    if identifier is not None and len(identifiers) > 1:
+        raise CliError(
+            "--identifier names one paper, so it cannot be combined with "
+            "several inputs. Add them one at a time, or drop the flag and let "
+            "each document be read from its own first page."
+        )
     options = _build_add_options(
-        title=title, group=group, keep_original=keep_original, citekey=citekey
+        title=title,
+        group=group,
+        keep_original=keep_original,
+        citekey=citekey,
+        identifier=identifier,
     )
     _add_and_report(
         "literature",
