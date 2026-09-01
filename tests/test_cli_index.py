@@ -141,9 +141,11 @@ def test_index_group_help(runner: CliRunner) -> None:
 
     assert result.exit_code == 0
     assert "build" in result.output
-    assert "fetch" in result.output
     assert "status" in result.output
     assert "list" in result.output
+    # There is no `index fetch`: boepie publishes no prebuilt index, so an
+    # index is always built on the machine that queries it.
+    assert "fetch" not in result.output
 
 
 def test_context_group_has_fetch(runner: CliRunner) -> None:

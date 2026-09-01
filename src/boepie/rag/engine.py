@@ -177,7 +177,7 @@ class IndexFreshness:
     ``in step``       every document the index holds is still on disk, unchanged.
     ``stale``         at least one is changed or gone, so hits are wrong.
     ``corpus absent`` no corpus here to compare against - the ordinary shape of
-                      a machine holding a prebuilt index fetched from a release.
+                      a machine that indexed a corpus it no longer keeps.
     ``unrecorded``    the index predates this check, or was built by a loader
                       that cannot be walked again. Unverifiable, never "fresh".
 
@@ -382,26 +382,23 @@ class QueryHandle:
 def _build_hint(collection: str) -> str:
     """The command that actually produces `collection`'s index.
 
-    The context collection is the odd one out: its index is derived state
-    inside a project's own `.boepie/` bundle, rebuilt by the bundle commands,
-    never fetched from a release or built with `index build`.
+    Always a local build: boepie publishes no prebuilt index, so every index
+    on a machine is built on it. The context collection is the odd one out
+    only in which command does the building - its index is derived state
+    inside a project's own `.boepie/` bundle, rebuilt by the bundle commands.
     """
     if collection == "context":
         return "Run `boepie context apply` (or `init` if there is no bundle yet)."
-    return (
-        f"Run `boepie index fetch --collection {collection}` (end user) or "
-        f"`boepie index build --collection {collection}` (dev) first."
-    )
+    return f"Run `boepie index build --collection {collection}` first."
 
 
 def _rebuild_hint(collection: str) -> str:
     """The command that brings `collection`'s index back in step with its corpus.
 
-    Deliberately not `_build_hint`: that one offers `index fetch` as the
-    end-user route to an index that does not exist yet, and fetching is the
-    one thing that cannot fix staleness. A prebuilt index is built over
-    boepie's own corpus, not over the local one that just changed, so it would
-    replace a stale answer with an unrelated one.
+    Separate from `_build_hint` because the two say different things for the
+    context bundle, whose index is rebuilt by `context apply` rather than by
+    `index build`, and because a rebuild is a different instruction from a
+    first build even when the command happens to be the same.
     """
     if collection == "context":
         return "Run `boepie context apply` to rebuild it."

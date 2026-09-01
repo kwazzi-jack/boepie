@@ -1,11 +1,12 @@
 """Shared GitHub-release-asset helpers: URL construction and checksum-verified download.
 
-Lifted from the download/checksum logic that lived inline in `cli.py`'s
-`index fetch` command so `boepie.context.bundle` (the curated-content
-tarball) and the CLI's index-fetch path share one implementation instead of
-two copies that could drift apart. Keeps the `.sha256` sidecar convention:
-every asset `<name>` is published alongside a `<name>.sha256` file holding
-`<digest>  <name>`.
+One consumer remains: `boepie.context.bundle`, which fetches the curated
+`.boepie/` content tarball. Built search indices used to be published the
+same way and are not any more - an index is now always built on the machine
+that queries it, so `index fetch` and the assets behind it are gone.
+
+Keeps the `.sha256` sidecar convention: every asset `<name>` is published
+alongside a `<name>.sha256` file holding `<digest>  <name>`.
 """
 
 from __future__ import annotations

@@ -389,7 +389,7 @@ async def test_build_hint_names_a_real_command_per_collection(tmp_path):
     """The fix clause must name a command that actually exists."""
     with pytest.raises(FileNotFoundError) as literature_error:
         await engine.load_for_query(tmp_path, "literature")
-    assert "boepie index fetch --collection literature" in str(literature_error.value)
+    assert "boepie index build --collection literature" in str(literature_error.value)
 
     with pytest.raises(FileNotFoundError) as context_error:
         await engine.load_for_query(tmp_path, "context")

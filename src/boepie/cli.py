@@ -5,12 +5,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import io
 import json
 import logging
 import os
 import shutil
-import tarfile
 import textwrap
 from collections.abc import Callable
 from pathlib import Path
@@ -44,8 +42,6 @@ from boepie.config import (
     DEFAULT_SNIPPET,
     DEFAULT_TOP_K,
     DOCS_DIR,
-    EMBEDDING_BINDING,
-    EMBEDDING_MODEL,
     INDEX_DIR,
     LITERATURE_DIR,
     LITERATURE_FETCH_DELAY,
@@ -100,14 +96,10 @@ from boepie.rag import (
     build,
     default_embedding_binding,
     embedding_options,
-    index_id_for,
     search,
 )
 from boepie.rag import read as rag_read
 from boepie.rag.models import Filter, SearchResult
-from boepie.release import (
-    download_verified_asset,
-)
 from boepie.tools._retrieval import (
     VIEWS,
     format_hits,
@@ -165,6 +157,22 @@ _HELP_CONFIG = click.RichHelpConfiguration(
 # Maps a collection name to the loader that builds it.
 # Context loader requires bundle_dir passed to __init__, so it's not here.
 _LOADERS = {"literature": LiteratureLoader, "docs": DocsLoader, "notes": NotesLoader}
+
+
+def _loader_for(collection: str):
+    """The loader for `collection`, reading the directory *this module* resolved.
+
+    Each loader also has its own `boepie.config` default, and constructing one
+    with no argument used to take it. That is the same path in ordinary use,
+    but it meant the CLI had two answers to "where does this corpus live" -
+    and the one a caller could redirect was not the one the build used.
+    Looked up inside the function rather than in a module-level table so the
+    current value is read at call time.
+    """
+    directories = {
+        "literature": LITERATURE_DIR, "docs": DOCS_DIR, "notes": NOTES_DIR,
+    }
+    return _LOADERS[collection](directories[collection])
 
 # Threshold for hint search results, on the *raw BM25* score of the top hit
 # (hint is BM25-only; see `_hint_search`). Placeholder value - the dummy
@@ -349,13 +357,13 @@ def serve() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Index management: build, fetch, status, list
+# Index management: build, status, list
 # ---------------------------------------------------------------------------
 
 
 @cli.group()
 def index() -> None:
-    """Manage search indices (build, fetch, status, list)."""
+    """Manage search indices (build, status, list)."""
 
 
 @index.command("build")
@@ -464,7 +472,7 @@ def _build_one(
         _build_context_index(bundle_dir)
         return
 
-    loader = _LOADERS[collection]()
+    loader = _loader_for(collection)
     embedding = resolve_embedding(max_async=embedding_concurrency)
 
     with Progress(
@@ -499,114 +507,6 @@ def _build_one(
         f"{manifest.count} chunks into '{collection}/{manifest.index_id}' "
         f"(embedding={manifest.embedding_kind}:{manifest.embedding_model}).",
         lead="Indexed",
-    )
-
-
-@index.command("fetch")
-@click.option("--collection", default="docs", show_default=True)
-@click.option(
-    "--tag",
-    default="latest",
-    show_default=True,
-    help="GitHub release tag to fetch from.",
-)
-@click.option(
-    "--index-name",
-    default=None,
-    help="Which built index id to fetch (default: derived from the active embedding config).",
-)
-@click.option(
-    "--force", is_flag=True, help="Re-download and overwrite even if already present."
-)
-@click.option(
-    "--embedding-binding",
-    default=EMBEDDING_BINDING,
-    show_default=True,
-    type=click.Choice(["fastembed", "ollama", "openai"]),
-)
-@click.option("--embedding-model", default=EMBEDDING_MODEL, show_default=True)
-def index_fetch(
-    collection: str,
-    tag: str,
-    index_name: str | None,
-    force: bool,
-    embedding_binding: str,
-    embedding_model: str,
-) -> None:
-    """Download a prebuilt index from a GitHub release.
-
-    End-user path: no LLM needed, just an embedding backend matching the
-    fetched index (checked lazily by `boepie search` / `search_literature`,
-    warned about eagerly here too). The `context` collection is not
-    fetchable: it is derived from a project's own bundle, never shipped.
-    Neither is `literature`: boepie does not redistribute paper text, even in
-    built-index form - run `boepie corpus fetch --collection literature` then
-    `boepie index build --collection literature` instead.
-    """
-    if collection == _CONTEXT_COLLECTION:
-        raise CliError(
-            "the context index is built from a project's own .boepie/ bundle, "
-            "not published as a release asset. Run 'boepie context apply'."
-        )
-    if collection == "literature":
-        raise CliError(
-            "boepie does not publish a prebuilt literature index (that would "
-            "redistribute paper text). Run 'boepie corpus fetch --collection "
-            "literature' then 'boepie index build --collection literature' instead."
-        )
-    if collection == "notes":
-        raise CliError(
-            "notes are entirely user content and never published. Run "
-            "'boepie corpus add notes <identifier>' then "
-            "'boepie index build --collection notes' instead."
-        )
-
-    embedding = ModelBinding(
-        kind=embedding_binding, model=embedding_model
-    )  # pyright: ignore[reportArgumentType]
-    resolved_name = index_name or index_id_for(embedding)
-    asset = f"{collection}-{resolved_name}.tar.gz"
-
-    dest = INDEX_DIR / collection / resolved_name
-    if dest.exists() and not force:
-        display.warning(
-            f"Index '{collection}/{resolved_name}' already present at "
-            f"{dest} - skipped fetching tag={tag} (use --force to re-download)."
-        )
-        return
-
-    with console.status(f"Downloading {asset} from boepie release {tag}..."):
-        try:
-            data = download_verified_asset(tag, asset)
-        except ValueError as error:
-            display.error(str(error))
-            raise SystemExit(1) from error
-
-    (INDEX_DIR / collection).mkdir(parents=True, exist_ok=True)
-    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as tar:
-        tar.extractall(INDEX_DIR / collection, filter="data")
-
-    manifest_path = dest / "manifest.json"
-    if manifest_path.exists():
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if (
-            manifest.get("embedding_kind") != embedding.kind
-            or manifest.get("embedding_model") != embedding.model
-        ):
-            display.warning(
-                f"fetched index was built with embedding "
-                f"'{manifest.get('embedding_kind')}:{manifest.get('embedding_model')}' but "
-                f"the active config is '{embedding.kind}:{embedding.model}'. Querying will "
-                f"fail until these match - see BOEPIE_EMBEDDING_BINDING/BOEPIE_EMBEDDING_MODEL."
-            )
-
-    latest_path = INDEX_DIR / collection / "latest.json"
-    latest_path.write_text(
-        json.dumps({"index_id": resolved_name}, indent=2), encoding="utf-8"
-    )
-
-    display.success(
-        f"'{collection}/{resolved_name}' (tag={tag}) into {dest}.", lead="Fetched"
     )
 
 
@@ -728,7 +628,7 @@ def index_status() -> None:
 
 @index.command("list")
 def index_list() -> None:
-    """Enumerate all built and fetched indices on this machine.
+    """Enumerate every index built on this machine.
 
     Shows collection names and their available index ids.
     """
@@ -2032,6 +1932,7 @@ async def _read_span(
         # and treats a CliError as "look in the next one", which would report
         # a stale index as an unknown document id.
         raise
+    except ValueError as error:
         raise CliError(one_line(error)) from error
     except KeyError as error:
         raise CliError(
@@ -2282,37 +2183,47 @@ def context_reset(directory: str, yes: bool) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Sync: composite bootstrap (context fetch -> index fetch -> context apply/init)
+# Sync: composite bootstrap (context fetch -> corpus fetch -> index build
+# -> context apply/init)
 # ---------------------------------------------------------------------------
 
 
-def _build_literature_index() -> None:
-    """Build the literature collection's index and report the count.
+# The collections `sync` converges: fetched into the corpus, then indexed
+# here. There is no prebuilt index to download for either - boepie publishes
+# none, so every index on a machine is built on it. For literature that has
+# always been true (converted paper text is not boepie's to redistribute);
+# docs joined it when index assets were dropped altogether.
+_SYNC_COLLECTIONS = ("literature", "docs")
 
-    Hybrid (BM25 + dense), unlike the context bundle's BM25-only index: the
-    embedding config comes from `default_embedding_binding()` (the active
-    BOEPIE_EMBEDDING_* config), matching what `index build --collection
-    literature` would use with no overrides.
+
+def _build_synced_index(collection: str) -> None:
+    """Build one collection's index during `sync`, skipping an empty corpus.
+
+    Hybrid (BM25 + dense), unlike the context bundle's BM25-only index, and
+    the embedding config is `default_embedding_binding()` - the active
+    BOEPIE_EMBEDDING_* config, matching what `index build --collection X`
+    would use with no overrides.
+
+    An empty corpus is a normal state here rather than a failure: a fetch
+    that just warned and continued leaves nothing to index, and `sync` still
+    has a bundle to converge afterwards.
     """
-    manifest = _run(
-        build(
-            LiteratureLoader(),
-            index_root=INDEX_DIR,
-            embedding=default_embedding_binding(),
+    try:
+        manifest = _run(
+            build(
+                _loader_for(collection),
+                index_root=INDEX_DIR,
+                embedding=default_embedding_binding(),
+            )
         )
-    )
+    except EmptyCollectionError:
+        display.muted(f"nothing to index in '{collection}'", indent="  ")
+        return
     display.success(
         f"{manifest.count} chunks into "
-        f"'literature/{manifest.index_id}' (embedding={manifest.embedding_kind}:{manifest.embedding_model}).",
+        f"'{collection}/{manifest.index_id}' (embedding={manifest.embedding_kind}:{manifest.embedding_model}).",
         lead="Indexed",
     )
-
-
-# Collections `sync` fetches a prebuilt index for from a release, unless
-# restricted to `--only context`. `literature` is deliberately absent: it is
-# fetched from arXiv and built locally instead (see `sync` below) - boepie
-# does not redistribute paper text, even in built-index form.
-_SYNC_RELEASE_INDEX_COLLECTIONS = ("docs",)
 
 
 @contextlib.contextmanager
@@ -2320,8 +2231,9 @@ def _quiet(enabled: bool):
     """Swallow everything `console` prints inside the block when `enabled`.
 
     Used by `sync`'s default (non-verbose) run so its component steps -
-    `context fetch`, `index fetch`, `apply`/`init` - stay silent and sync
-    can report a single summary line instead of each step's own output.
+    `context fetch`, `corpus fetch`, `index build`, `apply`/`init` - stay
+    silent and sync can report a single summary line instead of each step's
+    own output.
     """
     if not enabled:
         yield
@@ -2384,25 +2296,26 @@ def _sync_network_step(
 def sync(
     ctx: click.Context, only: str | None, tag: str, directory: str, verbose: bool
 ) -> None:
-    """Bring the context bundle and default indices up to date in one step.
+    """Bring the context bundle and the default corpora up to date in one step.
 
-    Composite of `context fetch` -> `index fetch` (docs) + `corpus fetch
-    --collection literature` + a local literature index build -> `context
-    apply` (or `init` on a first run, when no `.boepie/` exists yet under
-    --directory). Adds nothing of its own beyond calling those steps: `index
-    fetch` already skips a collection that is present, `corpus fetch`
-    already skips a paper already converted, and `apply`/`init` already
-    rebuild the BM25 index. Unlike `docs`, the literature index is never
-    downloaded from a release - it is fetched from arXiv and built locally,
-    tag/network issues notwithstanding (see `boepie.literature.fetch`).
+    Composite of `context fetch` -> `corpus fetch --collection
+    literature,docs` -> `index build` for both -> `context apply` (or `init`
+    on a first run, when no `.boepie/` exists yet under --directory). Adds
+    nothing of its own beyond calling those steps: `corpus fetch` already
+    skips a document already converted, and `apply`/`init` already rebuild
+    the bundle's own BM25 index.
 
-    Each network step (`context fetch`, `index fetch`, `corpus fetch
-    --collection literature`) warns and continues on failure instead of
-    aborting, so the final offline convergence step still runs against
-    whatever content or indices are already cached, packaged or previously
-    fetched - the overall exit code stays 0 as long as that local step
-    succeeds. By default only a one-line summary is printed; pass --verbose
-    to see each step's own message.
+    **Every index is built here, never downloaded.** boepie publishes no
+    prebuilt index, so the first `sync` on a machine fetches each paper from
+    arXiv and crawls each documentation site, which takes minutes rather than
+    seconds. Both fetches are resumable, so a later `sync` only picks up
+    what is new.
+
+    The network steps warn and continue on failure instead of aborting, so
+    the final offline convergence step still runs against whatever is already
+    cached, packaged or previously fetched - the overall exit code stays 0 as
+    long as that local step succeeds. By default only a one-line summary is
+    printed; pass --verbose to see each step's own message.
     """
     sync_context = only != "indices"
     sync_indices = only != "context"
@@ -2412,29 +2325,19 @@ def sync(
         _sync_network_step(ctx, fetch, f"context fetch --tag {tag}", quiet, tag=tag)
 
     if sync_indices:
-        for collection in _SYNC_RELEASE_INDEX_COLLECTIONS:
-            _sync_network_step(
-                ctx,
-                index_fetch,
-                f"index fetch --collection {collection} --tag {tag}",
-                quiet,
-                collection=collection,
-                tag=tag,
-            )
-
         _sync_network_step(
             ctx,
             corpus_fetch,
-            "corpus fetch --collection literature",
+            f"corpus fetch --collection {','.join(_SYNC_COLLECTIONS)}",
             quiet,
-            collections=("literature",),
+            collections=_SYNC_COLLECTIONS,
             force_targets=(),
             delay=None,
             verbose=False,
         )
-        if LITERATURE_DIR.exists():
-            with _quiet(quiet):
-                _build_literature_index()
+        with _quiet(quiet):
+            for collection in _SYNC_COLLECTIONS:
+                _build_synced_index(collection)
 
     if sync_context:
         target_dir = Path(directory).resolve()

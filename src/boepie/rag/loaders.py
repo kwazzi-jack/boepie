@@ -65,8 +65,8 @@ class CorpusRevision:
     makes the check self-contained: the index says which directory to ask, so
     nothing has to reconstruct that from configuration. An index built on
     another machine names a directory that is not here, and is then simply not
-    checked - which is the right answer for a prebuilt index fetched from a
-    release, where there is no local corpus to be inconsistent with.
+    checked - which is the right answer for an index built on another
+    machine, where there is no local corpus to be inconsistent with.
 
     `documents` maps each indexed document's id to a digest of the body that
     was indexed. A map rather than a list because the two halves of staleness
@@ -202,8 +202,7 @@ class LiteratureLoader(_CorpusLoader):
     """Loads the paper corpus under ``LITERATURE_DIR``.
 
     Every document here was fetched and converted on this machine (see
-    `boepie.literature.fetch`); boepie never ships converted paper text, so
-    there is no prebuilt index to describe and no bibliography file to
+    `boepie.literature.fetch`), and there is no bibliography file to
     fingerprint - the packaged manifest naming which arXiv ids to pull is the
     only thing boepie itself publishes.
     """
