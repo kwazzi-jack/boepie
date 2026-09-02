@@ -298,28 +298,60 @@ class PaperIdentifier:
     value: str
 
 
-def find_paper_identifier(text: str) -> PaperIdentifier | None:
-    """The first identifier in `text`, preferring the most useful kind.
+def _all_matches(pattern: re.Pattern[str], text: str) -> list[str]:
+    """Every distinct group-1 match, in order of first appearance."""
+    seen: dict[str, None] = {}
+    for match in pattern.finditer(text):
+        seen.setdefault(match.group(1), None)
+    return list(seen)
 
-    arXiv id, then DOI, then ADS bibcode - the order of how much each one can
-    be turned into. An arXiv id resolves to full metadata over a public API
-    with no key; a DOI may resolve to an arXiv preprint and otherwise stands
-    on its own; a bibcode is identity only.
 
-    Whole-text search rather than a whole-string match, because this is
-    reading a page, not an argument. That is also why the caller hands over
-    only the first page: a bibliography would offer up dozens of other
-    people's identifiers, every one of them a wrong answer.
+def find_paper_identifiers(text: str) -> list[PaperIdentifier]:
+    """Every identifier `text` offers, most likely first - never just one.
+
+    boepie does not decide which of these names the document. It cannot: a
+    first page can carry the paper's own arXiv stamp, its journal DOI, an ADS
+    bibcode, and a DOI belonging to something it cites, and no amount of
+    pattern work distinguishes the last from the first three. Picking one and
+    writing it into the corpus would be a guess recorded as a fact, so the
+    list is handed to whoever can actually tell - see
+    `boepie.corpus.review`, which puts it in front of the user.
+
+    Ranked by kind first: arXiv id, then DOI, then bibcode, which is the order
+    of how much each can be turned into (an arXiv id resolves to full metadata
+    over a keyless public API; a DOI may resolve to a preprint; a bibcode is
+    identity only). Within a kind, order of appearance - and since the caller
+    hands over page furniture before body text, a margin stamp sorts above
+    something mentioned in a paragraph.
     """
     if not text.strip():
+        return []
+    found: list[PaperIdentifier] = []
+    for value in _all_matches(_MODERN_ARXIV, text) + _all_matches(_LEGACY_ARXIV, text):
+        found.append(PaperIdentifier(kind="arxiv", value=value))
+    for value in _all_matches(_DOI, text):
+        found.append(PaperIdentifier(kind="doi", value=value.rstrip(".,;)")))
+    for value in _all_matches(_ADS_BIBCODE, text):
+        found.append(PaperIdentifier(kind="bibcode", value=value))
+    return found
+
+
+def parse_identifier(identifier: str) -> PaperIdentifier | None:
+    """One identifier the user typed, classified.
+
+    Whole-argument rather than a search: `--identifier` is an answer, not a
+    page to scan, so `10.1093/x` is a DOI and not "a string containing one".
+    """
+    candidate = identifier.strip()
+    if not candidate:
         return None
-    arxiv_id = normalize_arxiv_id(text)
+    arxiv_id = normalize_arxiv_id(candidate)
     if arxiv_id is not None:
         return PaperIdentifier(kind="arxiv", value=arxiv_id)
-    doi = normalize_doi(text)
+    doi = normalize_doi(candidate)
     if doi is not None:
         return PaperIdentifier(kind="doi", value=doi)
-    bibcode = normalize_bibcode(text)
+    bibcode = normalize_bibcode(candidate)
     if bibcode is not None:
         return PaperIdentifier(kind="bibcode", value=bibcode)
     return None

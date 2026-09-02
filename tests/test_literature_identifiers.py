@@ -14,10 +14,11 @@ import pytest
 from boepie.literature.identifiers import (
     PaperIdentifier,
     arxiv_id_if_reference,
-    find_paper_identifier,
+    find_paper_identifiers,
     looks_like_bibtex,
     normalize_arxiv_id,
     normalize_bibcode,
+    parse_identifier,
     normalize_doi,
     parse_bibtex,
 )
@@ -227,30 +228,51 @@ def test_a_bibcode_is_found_inside_surrounding_text() -> None:
     )
 
 
-def test_an_arxiv_stamp_is_preferred_over_a_doi_and_a_bibcode() -> None:
-    """Ordered by how much each can be turned into: an arXiv id resolves to
-    full metadata over a keyless public API, a DOI may resolve to a preprint,
-    a bibcode is identity only."""
+def test_every_candidate_on_the_page_is_offered_not_just_the_first() -> None:
+    """boepie cannot tell the paper's own DOI from one it cites, so it does not
+    try: it ranks what it found and hands the list over."""
     page = (
         "arXiv:1805.03410v2 [astro-ph.IM] 15 May 2018\n"
         "MNRAS 478, 2399 (2018)  doi:10.1093/mnras/sty1221\n"
         "2018MNRAS.478.2399K\n"
+        "See also Smirnov 2011, doi:10.1051/0004-6361/201015249\n"
     )
 
-    assert find_paper_identifier(page) == PaperIdentifier(
-        kind="arxiv", value="1805.03410"
-    )
+    assert find_paper_identifiers(page) == [
+        PaperIdentifier(kind="arxiv", value="1805.03410"),
+        PaperIdentifier(kind="doi", value="10.1093/mnras/sty1221"),
+        PaperIdentifier(kind="doi", value="10.1051/0004-6361/201015249"),
+        PaperIdentifier(kind="bibcode", value="2018MNRAS.478.2399K"),
+    ]
 
 
-def test_a_doi_is_preferred_over_a_bibcode() -> None:
+def test_candidates_are_ranked_by_what_each_can_be_turned_into() -> None:
+    """An arXiv id resolves to full metadata over a keyless public API, a DOI
+    may resolve to a preprint, a bibcode is identity only - so that is the
+    order they are offered in, whatever order they appear on the page."""
     page = "2011A&A...527A.106S\ndoi:10.1051/0004-6361/201015249\n"
 
-    assert find_paper_identifier(page) == PaperIdentifier(
-        kind="doi", value="10.1051/0004-6361/201015249"
-    )
+    assert [candidate.kind for candidate in find_paper_identifiers(page)] == [
+        "doi",
+        "bibcode",
+    ]
 
 
-def test_a_page_with_no_identifier_yields_none() -> None:
+def test_a_page_with_no_identifier_offers_nothing() -> None:
     """The honest common case: a scan, a memo, a book chapter."""
-    assert find_paper_identifier("Accelerated C++\nAndrew Koenig\n") is None
-    assert find_paper_identifier("") is None
+    assert find_paper_identifiers("Accelerated C++\nAndrew Koenig\n") == []
+    assert find_paper_identifiers("") == []
+
+
+def test_a_typed_identifier_is_classified_whole_not_searched() -> None:
+    """`--identifier` is an answer, not a page to scan."""
+    assert parse_identifier("10.1093/mnras/sty1221") == PaperIdentifier(
+        kind="doi", value="10.1093/mnras/sty1221"
+    )
+    assert parse_identifier("arXiv:1805.03410v2") == PaperIdentifier(
+        kind="arxiv", value="1805.03410"
+    )
+    assert parse_identifier("1974A&AS...15..417H") == PaperIdentifier(
+        kind="bibcode", value="1974A&AS...15..417H"
+    )
+    assert parse_identifier("nonsense") is None

@@ -414,6 +414,59 @@ def test_corpus_add_literature_reports_an_unknown_arxiv_id(
     assert "no entry" in result.output.lower()
 
 
+def _stub_mineru(monkeypatch: pytest.MonkeyPatch, front_page: str) -> None:
+    """Convert without MinerU, answering with a chosen first page."""
+    from boepie.corpus.intake import MineruResult
+
+    def fake_convert(paths, *, device_mode, backend, model_source, page_limit=None):
+        return MineruResult(
+            markdown={path: "# Converted\n\nBody.\n" for path in paths},
+            front_page={path: front_page for path in paths},
+        )
+
+    monkeypatch.setattr("boepie.corpus.intake.mineru_available", lambda: True)
+    monkeypatch.setattr("boepie.corpus.add.convert_with_mineru", fake_convert)
+
+
+def test_corpus_add_literature_without_a_terminal_names_both_ways_forward(
+    runner: CliRunner, tmp_corpus_dirs: dict[str, Path], tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A pipeline has nobody to ask, so it is told how to answer in advance
+    rather than having the top-ranked candidate applied on its behalf."""
+    _stub_mineru(monkeypatch, "arXiv:1805.03410v2 [astro-ph.IM]")
+    source = tmp_path / "scan.pdf"
+    source.write_bytes(b"%PDF-1.7 body")
+
+    result = runner.invoke(cli.cli, ["corpus", "add", "literature", str(source)])
+
+    assert result.exit_code == 1
+    assert "--yes" in result.output
+    assert "--identifier" in result.output
+    assert not list(tmp_corpus_dirs["literature"].rglob("*.md"))
+
+
+def test_corpus_add_literature_hints_at_the_collection_the_review_wrote_to(
+    runner: CliRunner, tmp_corpus_dirs: dict[str, Path], tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The buffer can send a paper to notes, and a build hint naming
+    literature would then name the one collection nothing was written to."""
+    _stub_mineru(monkeypatch, "A scan with no identifier anywhere")
+    monkeypatch.setattr(cli, "_can_review", lambda: True)
+    monkeypatch.setattr(
+        "boepie.corpus.review.click.edit", lambda *, text, **_: text
+    )
+    source = tmp_path / "scan.pdf"
+    source.write_bytes(b"%PDF-1.7 body")
+
+    result = runner.invoke(cli.cli, ["corpus", "add", "literature", str(source)])
+
+    assert result.exit_code == 0, result.output
+    assert "index build --collection notes" in _plain(result.output)
+    assert list(tmp_corpus_dirs["notes"].rglob("*.md"))
+
+
 def test_corpus_add_docs_requires_a_project(
     runner: CliRunner, tmp_corpus_dirs: dict[str, Path]
 ) -> None:

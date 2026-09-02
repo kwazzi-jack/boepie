@@ -114,13 +114,14 @@ def test_a_malformed_content_list_is_not_an_error(tmp_path: Path) -> None:
 
 
 def _options(**overrides) -> AddOptions:
-    """Add options with the arXiv courtesy delay turned off.
+    """Add options with the courtesy delay off and the review pre-accepted.
 
-    These tests are about identity, not politeness - the delay itself is
-    exercised at the bottom of this module. Set the way a user could rather
-    than by stubbing the pause out, so the real code path still runs.
+    These tests are about what boepie can *find*, so they take the ranking as
+    it stands - which is what `--yes` means. The review buffer itself is
+    covered in `tests/test_corpus_review.py`. The delay is set the way a user
+    could rather than by stubbing the pause out, so the real path still runs.
     """
-    return AddOptions(arxiv_delay=0, **overrides)
+    return AddOptions(arxiv_delay=0, accept_review=True, **overrides)
 
 
 _METADATA = {
@@ -135,7 +136,7 @@ def mineru(monkeypatch: pytest.MonkeyPatch):
     """Stub MinerU, returning a chosen front page with the markdown."""
 
     def install(front_page: str) -> None:
-        def fake_convert(paths, *, device_mode, backend, model_source):
+        def fake_convert(paths, *, device_mode, backend, model_source, page_limit=None):
             return MineruResult(
                 markdown={path: "# Converted\n\nBody.\n" for path in paths},
                 front_page={path: front_page for path in paths},
@@ -233,30 +234,50 @@ def test_a_bibcode_is_recorded_and_never_resolved(
     assert arxiv == []
 
 
-def test_a_paper_with_no_findable_identity_is_refused_not_invented(
+def test_a_paper_with_no_findable_identity_never_enters_literature(
     tmp_path: Path, mineru, arxiv: list[str]
 ) -> None:
     """The rule that makes the rest of it hold: every literature document has
     a real identifier. A title-derived key would cite nothing and would leave
-    duplicate detection with nothing to compare, so `add` refuses instead."""
+    duplicate detection with nothing to compare, so the row is pre-set to
+    notes rather than written with an invented one."""
     mineru("Accelerated C++\nAndrew Koenig and Barbara Moo\n")
     corpus = tmp_path / "literature"
+    notes = tmp_path / "notes"
 
-    outcomes = add_literature(corpus, [_pdf(tmp_path)], _options())
+    outcomes = add_literature(corpus, [_pdf(tmp_path)], _options(), notes_dir=notes)
 
-    assert [outcome.status for outcome in outcomes] == ["failed"]
+    assert [outcome.status for outcome in outcomes] == ["added"]
     assert not list(corpus.rglob("*.md"))
+    assert list(notes.rglob("*.md"))
     assert arxiv == []
 
 
-def test_the_refusal_names_both_ways_forward(tmp_path: Path, mineru) -> None:
-    """Notes is a real answer, not a consolation prize: notes have no natural
-    key by design, so a document with no identity is what they are for."""
+def test_without_a_notes_directory_the_move_is_reported_rather_than_guessed(
+    tmp_path: Path, mineru
+) -> None:
+    """`add_literature` has nowhere to put it, so it says so instead of
+    inventing a home or a citekey."""
     mineru("A memo with no identifier anywhere\n")
 
     outcomes = add_literature(tmp_path / "literature", [_pdf(tmp_path)], _options())
 
+    assert [outcome.status for outcome in outcomes] == ["skipped"]
+    assert "boepie corpus add notes" in (outcomes[0].detail or "")
+
+
+def test_a_non_binary_file_with_no_identity_is_refused_with_both_ways_forward(
+    tmp_path: Path,
+) -> None:
+    """A Markdown file never reaches MinerU, so it is never surveyed and never
+    reviewed - the refusal is the only place left to say what to do."""
+    source = tmp_path / "memo.md"
+    source.write_text("# A memo\n\nNo identifier anywhere.\n", encoding="utf-8")
+
+    outcomes = add_literature(tmp_path / "literature", [str(source)], _options())
+
     detail = outcomes[0].detail or ""
+    assert outcomes[0].status == "failed"
     assert "--identifier" in detail
     assert "boepie corpus add notes" in detail
 

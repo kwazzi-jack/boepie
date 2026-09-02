@@ -40,6 +40,7 @@ from boepie.corpus.intake import (
     mineru_no_markdown,
     require_mineru,
     sha256_of,
+    title_from_markdown,
 )
 from boepie.corpus.ids import unique_id
 from boepie.corpus.layout import (
@@ -63,6 +64,11 @@ type AddStatus = Literal["added", "duplicate", "failed", "skipped"]
 # writes nothing until it finishes one.
 type BatchProgress = Callable[[int, int, int], None]
 
+# How many pages a survey pass parses. A paper states its own identity on page
+# one; the second is parsed because a page break does not always fall where
+# the front matter ends, and it costs about a second.
+_SURVEY_PAGES = 2
+
 
 @dataclass(frozen=True)
 class AddOptions:
@@ -75,6 +81,12 @@ class AddOptions:
     # does not state one on its own first page. The non-interactive form of
     # "boepie asked you for an identifier".
     identifier: str | None = None
+    # Skip the review buffer and take the ranking as it stands (`--yes`).
+    accept_review: bool = False
+    # Whether there is a terminal to open the buffer in. Passed in rather than
+    # detected here: a library caller has no terminal and must not be dropped
+    # into an editor, and a test must not be either.
+    can_review: bool = False
     project: str | None = None
     keep_original: bool = False
     mineru_device_mode: str = "auto"
@@ -109,6 +121,11 @@ class AddOutcome:
     # whose leading dot had to be stripped. The CLI decides whether to show
     # it; the outcome always carries it.
     notice: str | None = None
+    # Where the document actually landed, when that is not the collection the
+    # command named. The review buffer can move a paper to notes, and a
+    # "next: index build --collection literature" after that would name the
+    # one collection nothing was written to.
+    collection: str | None = None
 
 
 @dataclass
@@ -295,41 +312,93 @@ def _conversion_runs(paths: Sequence[Path], size: int) -> Iterator[Sequence[Path
         yield paths[start : start + size]
 
 
-def _plan_binaries(
+@dataclass
+class _BinarySurvey:
+    """What a batch's binary documents are, before any of them is converted.
+
+    The cheap half of the work. Hashing settles duplicates for a file read
+    apiece, and a two-page MinerU pass learns what each remaining document
+    *is* at about 1.2 seconds each - against sixteen for a full conversion.
+    That gap is what lets a folder of fifty papers be reviewed a minute after
+    it was asked for rather than a quarter of an hour.
+    """
+
+    settled: dict[Path, AddOutcome] = field(default_factory=dict)
+    front_page: dict[Path, str] = field(default_factory=dict)
+    title: dict[Path, str] = field(default_factory=dict)
+    pending: list[Path] = field(default_factory=list)
+
+
+def _survey_binaries(
     identifiers: Iterable[str],
     state: _CorpusState,
     options: AddOptions,
     *,
-    on_batch: BatchProgress | None = None,
-) -> _BinaryPlan:
-    """Settle the duplicates and convert the rest, before anything is written."""
-    plan = _BinaryPlan()
+    sniff: bool,
+) -> _BinarySurvey:
+    """Settle duplicates by checksum, and optionally read each first page.
+
+    `sniff` is a literature concern: only there does a document need an
+    identity of its own before it can be written, so only there is a second
+    MinerU pass worth its ~20 seconds of model load.
+    """
+    survey = _BinarySurvey()
     candidates = _binary_candidates(identifiers)
     if not candidates:
-        return plan
+        return survey
 
-    pending: list[Path] = []
     for path in candidates:
         existing = state.checksums.get(sha256_of(path.read_bytes()))
         if existing is not None:
-            plan.settled[path] = AddOutcome(
+            survey.settled[path] = AddOutcome(
                 identifier=str(path),
                 status="duplicate",
                 document_id=existing,
                 detail="identical content is already in this collection",
             )
         else:
-            pending.append(path)
+            survey.pending.append(path)
 
-    if not pending:
-        return plan
+    if not survey.pending:
+        return survey
 
     # Checked once, and before the first conversion rather than during it:
     # fifty copies of the same install instructions say no more than one, and
     # a batch that needs MinerU cannot get anywhere without it.
-    require_mineru(pending)
+    require_mineru(survey.pending)
 
-    runs = list(_conversion_runs(pending, options.mineru_batch_size))
+    if sniff:
+        for run in _conversion_runs(survey.pending, options.mineru_batch_size):
+            try:
+                result = convert_with_mineru(
+                    run,
+                    device_mode=options.mineru_device_mode,
+                    backend=options.mineru_backend,
+                    model_source=options.mineru_model_source,
+                    page_limit=_SURVEY_PAGES,
+                )
+            except IntakeError:
+                # A failed survey is not fatal: the document simply offers no
+                # candidates, and the full conversion fails it afterwards with
+                # MinerU's own reason rather than this pass guessing at one.
+                continue
+            for path in run:
+                survey.front_page[path] = result.front_page.get(path, "")
+                markdown = result.markdown.get(path)
+                if markdown:
+                    survey.title[path] = title_from_markdown(markdown, path.stem)
+    return survey
+
+
+def _convert_binaries(
+    paths: Sequence[Path],
+    options: AddOptions,
+    *,
+    on_batch: BatchProgress | None = None,
+) -> _BinaryPlan:
+    """Convert `paths` in full, in runs, into a plan the write loop can use."""
+    plan = _BinaryPlan()
+    runs = list(_conversion_runs(list(paths), options.mineru_batch_size))
     for number, run in enumerate(runs, start=1):
         if on_batch is not None:
             on_batch(len(run), number, len(runs))
@@ -368,6 +437,24 @@ def _plan_binaries(
                 prepared_markdown=markdown,
             )
             plan.front_page[path] = result.front_page.get(path, "")
+    return plan
+
+
+def _plan_binaries(
+    identifiers: Iterable[str],
+    state: _CorpusState,
+    options: AddOptions,
+    *,
+    on_batch: BatchProgress | None = None,
+) -> _BinaryPlan:
+    """Settle the duplicates and convert the rest, before anything is written.
+
+    The notes and docs path: neither collection needs a document to identify
+    itself, so there is nothing to review and no reason to survey first.
+    """
+    survey = _survey_binaries(identifiers, state, options, sniff=False)
+    plan = _convert_binaries(survey.pending, options, on_batch=on_batch)
+    plan.settled.update(survey.settled)
     return plan
 
 
@@ -628,6 +715,7 @@ def add_literature(
     identifiers: Sequence[str],
     options: AddOptions,
     *,
+    notes_dir: Path | None = None,
     on_batch: BatchProgress | None = None,
 ) -> list[AddOutcome]:
     """Add papers by arXiv id, DOI, .bib file, local file, or URL.
@@ -636,6 +724,12 @@ def add_literature(
     arXiv ids, then DOIs, and only then does the shared file/URL core run. An
     arXiv id is checked before the filesystem so `2409.19750` is read as a
     paper rather than as a missing file.
+
+    Local documents go through a review first (`boepie.corpus.review`), where
+    the identifiers found on each first page are offered as a ranked choice
+    and rows with none are pre-set to notes. `notes_dir` is where those land -
+    without it a row moved to notes is reported as skipped instead, since
+    `add_literature` has nowhere else to put it.
     """
     from boepie.literature.identifiers import (
         arxiv_id_if_reference,
@@ -683,7 +777,7 @@ def add_literature(
     # this pass deliberately does not wait for. So an entry carrying a DOI
     # keeps the old one-at-a-time conversion; the common batch - a folder of
     # PDFs, or a bibliography of scans with no identifiers - is planned here.
-    plan = _plan_binaries(
+    survey = _survey_binaries(
         [identifier for identifier, entry, _ in queue if entry is None]
         + [
             entry.file_path
@@ -695,10 +789,32 @@ def add_literature(
         ],
         state,
         options,
-        on_batch=on_batch,
+        sniff=True,
+    )
+
+    decisions = _review_survey(survey, options)
+    outcomes.extend(decisions.outcomes)
+    plan = _convert_binaries(decisions.accepted, options, on_batch=on_batch)
+    plan.settled.update(survey.settled)
+    plan.settled.update(decisions.settled)
+    plan.front_page.update(
+        {path: survey.front_page.get(path, "") for path in decisions.accepted}
+    )
+    chosen = decisions.chosen
+    outcomes.extend(
+        _write_reviewed_notes(notes_dir, decisions.to_notes, plan, options)
     )
 
     for identifier, entry, walked_group in queue:
+        # A `.bib` entry was surveyed under its `file` path, not the `.bib`
+        # argument that produced it, so that is the path the review settled.
+        surveyed = (
+            Path(entry.file_path).expanduser()
+            if entry is not None and entry.file_path
+            else Path(identifier).expanduser()
+        )
+        if surveyed in decisions.dropped:
+            continue
         # A bib entry resolves to whatever it points at: an arXiv id, then a
         # DOI, then a local PDF named by its `file` field.
         if entry is not None:
@@ -739,6 +855,7 @@ def add_literature(
                         label,
                         options,
                         plan,
+                        chosen,
                         entry=entry,
                         group=walked_group,
                     )
@@ -812,6 +929,7 @@ def add_literature(
                     identifier,
                     options,
                     plan,
+                    chosen,
                     group=walked_group,
                 )
             )
@@ -861,8 +979,8 @@ class _FrontPageFacts:
     """What a paper's own first page established about it.
 
     All fields empty is the honest common case - a scanned figure, a memo, a
-    PDF with no identifier anywhere - and the caller falls back to a
-    title-derived citekey exactly as before.
+    PDF with no identifier anywhere - and the caller refuses the document
+    rather than inventing a citekey from its title.
     """
 
     title: str = ""
@@ -871,6 +989,135 @@ class _FrontPageFacts:
     doi: str | None = None
     arxiv_id: str | None = None
     bibcode: str | None = None
+
+
+@dataclass
+class _ReviewDecisions:
+    """What the user settled in the review buffer."""
+
+    # Paths to convert in full and write to literature.
+    accepted: list[Path] = field(default_factory=list)
+    # The identifier chosen for each accepted path, spelled as the user left
+    # it. This is the whole point of the review: boepie ranked the candidates,
+    # a person picked.
+    chosen: dict[Path, str] = field(default_factory=dict)
+    # Paths moved to the notes collection, which is where a document with no
+    # bibliographic identity belongs.
+    to_notes: list[Path] = field(default_factory=list)
+    # Rows deleted from the buffer, reported as skipped.
+    outcomes: list[AddOutcome] = field(default_factory=list)
+    settled: dict[Path, AddOutcome] = field(default_factory=dict)
+    # Every path the review took out of the literature write loop, whatever
+    # it decided: moved to notes, deleted from the buffer, or abandoned with
+    # the whole add. The loop must skip all three, or a document the user
+    # already settled is reported a second time - a cancelled review used to
+    # come back `skipped` and then `failed` for the same file.
+    dropped: set[Path] = field(default_factory=set)
+
+
+def _review_survey(survey: _BinarySurvey, options: AddOptions) -> _ReviewDecisions:
+    """Put the surveyed documents in front of the user and read back the answer.
+
+    Skipped entirely when nothing was inferred - a batch of bare arXiv ids or
+    `.bib` entries carries its identity in the arguments, and there is nothing
+    to confirm. The buffer exists to check guesses, not to be ceremony.
+    """
+    from boepie.corpus.review import (
+        ReviewCancelled,
+        ReviewRow,
+        ReviewUnavailable,
+        review,
+    )
+    from boepie.literature.identifiers import find_paper_identifiers
+
+    decisions = _ReviewDecisions()
+    if not survey.pending:
+        return decisions
+
+    rows = [
+        ReviewRow.for_document(
+            path,
+            survey.title.get(path, path.stem),
+            find_paper_identifiers(
+                options.identifier or survey.front_page.get(path, "")
+            ),
+        )
+        for path in survey.pending
+    ]
+    # `--identifier` is already an answer, and it is the user's: asking them
+    # to confirm what they just typed would be the ceremony above.
+    edit = not options.accept_review and options.identifier is None
+    if edit and not options.can_review:
+        raise ReviewUnavailable(
+            "there is no terminal to review in. Re-run with --yes to take the "
+            "likeliest identifier for each document, or name one with "
+            "--identifier."
+        )
+
+    try:
+        settled = review(rows, edit=edit)
+    except ReviewCancelled:
+        return _ReviewDecisions(
+            outcomes=[
+                AddOutcome(
+                    identifier=str(row.path),
+                    status="skipped",
+                    detail="review cancelled, nothing was written",
+                )
+                for row in rows
+            ],
+            dropped={row.path for row in rows},
+        )
+
+    kept = {row.path for row in settled}
+    decisions.outcomes = [
+        AddOutcome(
+            identifier=str(row.path),
+            status="skipped",
+            detail="removed from the review",
+        )
+        for row in rows
+        if row.path not in kept
+    ]
+    decisions.dropped = {row.path for row in rows if row.path not in kept}
+    for row in settled:
+        if row.collection == "notes":
+            decisions.to_notes.append(row.path)
+            decisions.dropped.add(row.path)
+            continue
+        decisions.accepted.append(row.path)
+        decisions.chosen[row.path] = row.identifier
+    return decisions
+
+
+def _write_reviewed_notes(
+    notes_dir: Path | None,
+    paths: list[Path],
+    plan: _BinaryPlan,
+    options: AddOptions,
+) -> list[AddOutcome]:
+    """Write the rows the user moved out of literature into notes.
+
+    Cross-collection on purpose. "It has no identifier, so it is a note" is
+    the documented answer to an unidentifiable paper, and making the user
+    re-run a second command to act on a decision they already made in the
+    buffer would be answering the question twice.
+    """
+    if not paths:
+        return []
+    if notes_dir is None:
+        return [
+            AddOutcome(
+                identifier=str(path),
+                status="skipped",
+                detail="moved to notes in the review; add it with `boepie corpus add notes`",
+            )
+            for path in paths
+        ]
+    return [
+        replace(outcome, collection="notes")
+        for outcome in add_notes(notes_dir, [str(path) for path in paths], options)
+    ]
 
 
 def _no_identity_message(identifier: str) -> str:
@@ -895,7 +1142,7 @@ def _no_identity_message(identifier: str) -> str:
 
 
 def _identify_from_front_page(
-    front_page: str, options: AddOptions
+    front_page: str, options: AddOptions, chosen: str = ""
 ) -> _FrontPageFacts:
     """Read a paper's identity off its first page, resolving what it can.
 
@@ -914,12 +1161,13 @@ def _identify_from_front_page(
     is already in hand by then; refusing to add the document because arXiv was
     unreachable would trade a small loss for a total one.
     """
-    from boepie.literature.identifiers import find_paper_identifier, resolve_doi_to_arxiv
+    from boepie.literature.identifiers import parse_identifier, resolve_doi_to_arxiv
 
-    # An identifier the user supplied outranks the page: they are correcting
-    # something, and there is no reading of `--identifier` that means "unless
-    # the PDF disagrees".
-    found = find_paper_identifier(options.identifier or front_page)
+    # What the user settled in the review wins, then what they typed on the
+    # command line, then whatever the page offered. Each of the first two is
+    # an answer from a person; the last is a guess, and it only stands when
+    # nobody was there to correct it (`--yes`).
+    found = parse_identifier(chosen or options.identifier or front_page)
     if found is None:
         return _FrontPageFacts()
     if found.kind == "bibcode":
@@ -965,6 +1213,7 @@ def _add_literature_file(
     identifier: str,
     options: AddOptions,
     plan: _BinaryPlan,
+    chosen: dict[Path, str],
     *,
     entry: Any = None,
     group: str | None = None,
@@ -996,6 +1245,7 @@ def _add_literature_file(
         entry=entry,
         group=group,
         front_page=plan.front_page.get(path, ""),
+        chosen=chosen.get(path, ""),
     )
 
 
@@ -1009,6 +1259,7 @@ def _finish_literature(
     entry: Any,
     group: str | None = None,
     front_page: str = "",
+    chosen: str = "",
 ) -> AddOutcome:
     """Write a paper that came from a file or a plain URL rather than arXiv.
 
@@ -1039,7 +1290,7 @@ def _finish_literature(
             entry.arxiv_id,
         )
     else:
-        found = _identify_from_front_page(front_page, options)
+        found = _identify_from_front_page(front_page, options, chosen)
         if not (found.arxiv_id or found.doi or found.bibcode):
             return AddOutcome(
                 identifier=identifier,

@@ -462,6 +462,7 @@ def _stage_for_mineru(paths: Sequence[Path], staged_dir: Path) -> dict[str, Path
 
 def convert_with_mineru(
     paths: Sequence[Path], *, device_mode: str, backend: str, model_source: str,
+    page_limit: int | None = None,
 ) -> MineruResult:
     """Convert binary documents to Markdown with MinerU, in one process.
 
@@ -474,6 +475,13 @@ def convert_with_mineru(
     The caller decides how large a run is - see `boepie.corpus.add` - because
     MinerU writes nothing until the whole run finishes, so a run is also the
     unit of progress and the unit lost to an interruption.
+
+    `page_limit` stops MinerU after that many pages. Used to survey a batch
+    before committing to converting it: a paper states its own identity on
+    page one, so two pages are enough to learn what every document in a folder
+    *is*, at about 1.2 seconds each against 16 for a full conversion. The
+    markdown that comes back is a fragment and is meant to be discarded; the
+    front page is the point.
 
     Settings come from `boepie.config` (the `mineru` section) and are passed
     the way MinerU itself expects them: the device and model source as
@@ -493,10 +501,12 @@ def convert_with_mineru(
         environment = _mineru_environment(
             device_mode=device_mode, model_source=model_source
         )
+        command = ["mineru", "-p", str(staged_dir), "-o", str(output_dir), "-b", backend]
+        if page_limit is not None:
+            command += ["-s", "0", "-e", str(page_limit - 1)]
         try:
             completed = subprocess.run(
-                ["mineru", "-p", str(staged_dir), "-o", str(output_dir), "-b", backend],
-                capture_output=True, text=True, env=environment, check=False,
+                command, capture_output=True, text=True, env=environment, check=False,
             )
         except OSError as error:
             raise IntakeError(f"could not run mineru: {error}") from error

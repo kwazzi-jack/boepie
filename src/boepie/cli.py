@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import shutil
+import sys
 import textwrap
 from collections.abc import Callable
 from pathlib import Path
@@ -79,6 +80,7 @@ from boepie.corpus.layout import (
     lookup_path,
     unique_document_name,
 )
+from boepie.corpus.review import ReviewUnavailable
 from boepie.corpus.schema import KEY_FIELDS as _CORPUS_KEY_FIELDS
 from boepie.docs import DocsProject
 from boepie.docs import load_manifest as load_docs_manifest
@@ -754,6 +756,16 @@ def _converting_with_mineru(documents: int, number: int, total: int) -> None:
     )
 
 
+def _can_review() -> bool:
+    """Whether there is a terminal to open the review buffer in.
+
+    Both ends, not just one: a piped `boepie corpus add ... | tee` still has
+    a terminal on stdin, and opening an editor whose output nobody sees is
+    worse than saying there is nowhere to review.
+    """
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
 def _add_and_report(collection: str, adder: Callable[[], list[AddOutcome]]) -> None:
     """Run one `corpus add` and report it.
 
@@ -764,7 +776,7 @@ def _add_and_report(collection: str, adder: Callable[[], list[AddOutcome]]) -> N
     """
     try:
         outcomes = adder()
-    except (InputError, IntakeError) as error:
+    except (InputError, IntakeError, ReviewUnavailable) as error:
         raise CliError(str(error)) from error
     _report_add(collection, outcomes)
 
@@ -820,8 +832,13 @@ def _report_add(collection: str, outcomes: list[AddOutcome]) -> None:
         indent="\n",
     )
     if added:
+        # The review buffer can send a paper to notes, so the collections
+        # named here are the ones actually written to, not the one the
+        # command was called on.
+        landed = {outcome.collection or collection for outcome in added}
+        written = [name for name in _CORPUS_COLLECTIONS if name in landed]
         display.next_step(
-            f"boepie index build --collection {collection}",
+            f"boepie index build --collection {','.join(written)}",
             note="(once you have finished adding)",
         )
     # Failures only. A skip is a deliberate decision not to take something, so
@@ -851,11 +868,19 @@ def corpus_add() -> None:
     "one on its own first page. Names one paper, so it cannot be combined "
     "with several inputs.",
 )
+@click.option(
+    "--yes",
+    "accept_review",
+    is_flag=True,
+    help="Skip the review buffer and take the likeliest identifier boepie "
+    "found for each document. What scripts use.",
+)
 @_add_options
 def corpus_add_literature(
     identifiers: tuple[str, ...],
     citekey: str | None,
     identifier: str | None,
+    accept_review: bool,
     title: str | None,
     group: str | None,
     keep_original: bool | None,
@@ -868,7 +893,11 @@ def corpus_add_literature(
     one exists. A `.bib` file expands into all of its entries, following each
     one's arXiv id, DOI, or `file` path in turn: exporting from Zotero and
     adding the `.bib` is the best-supported way to bring in your own library.
-    PDFs and other documents are converted with MinerU.
+    PDFs and other documents are converted with MinerU, and each one is then
+    put in front of you in an editor before anything is written: boepie ranks
+    the identifiers it found on the first page, you pick. A document it could
+    not identify arrives pre-set to `notes`, because a literature document
+    without a real identifier is one boepie will not write.
     """
     if identifier is not None and len(identifiers) > 1:
         raise CliError(
@@ -882,11 +911,17 @@ def corpus_add_literature(
         keep_original=keep_original,
         citekey=citekey,
         identifier=identifier,
+        accept_review=accept_review,
+        can_review=_can_review(),
     )
     _add_and_report(
         "literature",
         lambda: add_literature(
-            LITERATURE_DIR, identifiers, options, on_batch=_converting_with_mineru
+            LITERATURE_DIR,
+            identifiers,
+            options,
+            notes_dir=NOTES_DIR,
+            on_batch=_converting_with_mineru,
         ),
     )
 
