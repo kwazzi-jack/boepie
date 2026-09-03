@@ -1504,6 +1504,22 @@ def _corpus_list_one(collection: str) -> None:
     display.info(f"{len(documents)} document(s).", indent="\n")
 
 
+def _reject_unusable_citekey(citekey: str) -> None:
+    """A citekey is typed into a `.bib` and into `read_literature`, so it has
+    to survive both: no whitespace, no separators, not empty."""
+    if not citekey.strip():
+        raise CliError("--citekey cannot be empty.")
+    bad = [
+        character for character in citekey if character.isspace() or character in "/\\,"
+    ]
+    if bad:
+        raise CliError(
+            "a citekey is a single token you can type into a .bib entry and "
+            "into read_literature, so it cannot contain whitespace, a slash "
+            "or a comma."
+        )
+
+
 @corpus.command("move")
 @click.option(
     "--collection", required=True, type=click.Choice(["literature", "docs", "notes"])
@@ -1516,18 +1532,33 @@ def _corpus_list_one(collection: str) -> None:
     help="New group, e.g. calibration/gains. Pass '' to move to the top level.",
 )
 @click.option("--title", default=None, help="New title, which also renames the file.")
+@click.option(
+    "--citekey",
+    default=None,
+    help="literature only: a new citekey, which is also a read handle. Must "
+    "not already be taken in the collection.",
+)
 def corpus_move(
-    collection: str, document_id: str, group: str | None, title: str | None
+    collection: str,
+    document_id: str,
+    group: str | None,
+    title: str | None,
+    citekey: str | None,
 ) -> None:
-    """Move or rename a document without breaking its read handles.
+    """Move, rename or re-key a document without breaking its read handles.
 
     A document is addressed by its `id`, never by its path, so regrouping and
     retitling are both safe: every `read_literature`/`read_docs`/`read_notes`
     handle, and every search hit already in an agent's context, stays valid.
     Rebuild the index afterwards so the recorded source paths match again.
     """
-    if group is None and title is None:
-        raise CliError("nothing to do: pass --group, --title, or both.")
+    if group is None and title is None and citekey is None:
+        raise CliError("nothing to do: pass --group, --title, --citekey, or any two.")
+    if citekey is not None and collection != "literature":
+        raise CliError(
+            f"--citekey applies to literature only, not to {collection}: only "
+            f"literature documents carry a bib block."
+        )
 
     collection_dir = _corpus_collection_dir(collection)
     documents = _corpus_documents(collection)
@@ -1553,6 +1584,31 @@ def corpus_move(
     if title is not None:
         updates["title"] = new_title
 
+    # The citekey is literature's natural key: duplicate detection compares
+    # it, and `read_literature` accepts it as an alias for the surrogate id.
+    # Two documents sharing one would make the alias ambiguous, and an
+    # ambiguous alias is dropped rather than guessed - so the handle would
+    # stop working for both.
+    if citekey is not None:
+        _reject_unusable_citekey(citekey)
+        taken_by = next(
+            (
+                other
+                for other in documents
+                if other.id != document_id and other.natural_key == citekey
+            ),
+            None,
+        )
+        if taken_by is not None:
+            raise CliError(
+                f"citekey '{citekey}' is already used by id={taken_by.id}. "
+                f"Citekeys are how a paper is cited and read, so they have to "
+                f"stay unique within the collection."
+            )
+        bib_block = dict(source.frontmatter.get("bib") or {})
+        bib_block["citekey"] = citekey
+        updates["bib"] = bib_block
+
     # A docs page's `project` is both its natural key and what `search_docs`
     # filters on, and by convention it is the top-level group it lives in.
     # Letting the two disagree would make the page unfilterable, so the block
@@ -1576,6 +1632,8 @@ def corpus_move(
         f"{moved.md_path.relative_to(collection_dir)}",
         lead="Moved",
     )
+    if citekey is not None:
+        display.muted(f"citekey is now '{citekey}'.")
     display.next_step(
         f"boepie index build --collection {collection}",
         before="Read handles are unchanged.",

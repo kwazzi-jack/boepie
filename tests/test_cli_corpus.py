@@ -685,6 +685,111 @@ def test_corpus_move_keeps_a_docs_page_project_in_step_with_its_group(
     assert frontmatter["docs"]["project"] == "newproject"
 
 
+def test_corpus_move_recites_a_paper_without_changing_its_id(
+    runner: CliRunner, tmp_corpus_dirs: dict[str, Path]
+) -> None:
+    """A derived citekey is a guess that can be corrected later; the id it is
+    attached to is not, so the read handle survives the correction."""
+    write_corpus_document(
+        tmp_corpus_dirs["literature"], document_id="litmoved01", title="A Paper",
+        body="Body.", managed_by="user",
+        bib={"citekey": "paperCubicalFast", "year": "2018"},
+    )
+
+    result = runner.invoke(
+        cli.cli,
+        ["corpus", "move", "--collection", "literature", "litmoved01",
+         "--citekey", "kenyonCubicalFast2018"],
+    )
+
+    assert result.exit_code == 0, result.output
+    frontmatter, _ = read_frontmatter(
+        (tmp_corpus_dirs["literature"] / "A Paper.md").read_text(encoding="utf-8")
+    )
+    assert frontmatter["bib"]["citekey"] == "kenyonCubicalFast2018"
+    assert frontmatter["bib"]["year"] == "2018"
+    assert frontmatter["id"] == "litmoved01"
+
+
+def test_corpus_move_refuses_a_citekey_another_document_already_has(
+    runner: CliRunner, tmp_corpus_dirs: dict[str, Path]
+) -> None:
+    """Two documents sharing a citekey make the alias ambiguous, and an
+    ambiguous alias is dropped - so the handle would stop working for both."""
+    for document_id, citekey in (("litone0001", "smirnov2011"), ("littwo0002", "kenyon2018")):
+        write_corpus_document(
+            tmp_corpus_dirs["literature"], document_id=document_id,
+            title=f"Paper {document_id}", body="Body.", managed_by="user",
+            bib={"citekey": citekey, "year": "2018"},
+        )
+
+    result = runner.invoke(
+        cli.cli,
+        ["corpus", "move", "--collection", "literature", "littwo0002",
+         "--citekey", "smirnov2011"],
+    )
+
+    assert result.exit_code == 1
+    assert "already used by id=litone0001" in _plain(result.output)
+
+
+def test_corpus_move_refuses_a_citekey_that_is_not_one_token(
+    runner: CliRunner, tmp_corpus_dirs: dict[str, Path]
+) -> None:
+    write_corpus_document(
+        tmp_corpus_dirs["literature"], document_id="litmoved02", title="A Paper",
+        body="Body.", managed_by="user", bib={"citekey": "paper2018", "year": "2018"},
+    )
+
+    result = runner.invoke(
+        cli.cli,
+        ["corpus", "move", "--collection", "literature", "litmoved02",
+         "--citekey", "kenyon et al 2018"],
+    )
+
+    assert result.exit_code == 1
+    assert "single token" in _plain(result.output)
+
+
+def test_corpus_move_citekey_is_literature_only(
+    runner: CliRunner, tmp_corpus_dirs: dict[str, Path], tmp_path: Path
+) -> None:
+    """Notes have no natural key by design, so there is nothing to rename."""
+    _add_note(runner, tmp_path)
+    frontmatter, _ = read_frontmatter(
+        (tmp_corpus_dirs["notes"] / "My Note.md").read_text(encoding="utf-8")
+    )
+
+    result = runner.invoke(
+        cli.cli,
+        ["corpus", "move", "--collection", "notes", frontmatter["id"],
+         "--citekey", "someKey2018"],
+    )
+
+    assert result.exit_code == 1
+    assert "applies to literature only" in _plain(result.output)
+
+
+def test_corpus_move_regroups_and_recites_in_one_call(
+    runner: CliRunner, tmp_corpus_dirs: dict[str, Path]
+) -> None:
+    write_corpus_document(
+        tmp_corpus_dirs["literature"], document_id="litmoved03", title="A Paper",
+        body="Body.", managed_by="user", bib={"citekey": "paper2018", "year": "2018"},
+    )
+
+    result = runner.invoke(
+        cli.cli,
+        ["corpus", "move", "--collection", "literature", "litmoved03",
+         "--group", "calibration", "--citekey", "kenyon2018"],
+    )
+
+    assert result.exit_code == 0, result.output
+    moved = tmp_corpus_dirs["literature"] / "calibration" / "A Paper.md"
+    frontmatter, _ = read_frontmatter(moved.read_text(encoding="utf-8"))
+    assert frontmatter["bib"]["citekey"] == "kenyon2018"
+
+
 def test_corpus_move_requires_something_to_change(
     runner: CliRunner, tmp_corpus_dirs: dict[str, Path], tmp_path: Path
 ) -> None:
@@ -699,6 +804,7 @@ def test_corpus_move_requires_something_to_change(
 
     assert result.exit_code == 1
     assert "nothing to do" in result.output
+    assert "--citekey" in result.output
 
 
 def test_corpus_move_names_a_way_to_find_the_id(
