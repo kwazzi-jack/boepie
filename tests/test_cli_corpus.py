@@ -48,8 +48,8 @@ def tmp_corpus_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str
     instead of the real machine-global defaults - hermetic, and never
     touches a developer's own fetched corpus."""
     dirs = {
-        "literature": tmp_path / "literature-corpus",
-        "docs": tmp_path / "docs-corpus",
+        "literature": tmp_path / "literature",
+        "docs": tmp_path / "docs",
         "notes": tmp_path / "notes",
     }
     monkeypatch.setattr(cli, "LITERATURE_DIR", dirs["literature"])

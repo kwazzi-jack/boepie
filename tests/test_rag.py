@@ -338,7 +338,7 @@ def test_docs_loader_ids_are_surrogates_not_paths(tmp_path):
     The old loader derived an id from `{project}/{page}`, which meant moving
     or renaming a page silently invalidated every read handle pointing at it.
     """
-    corpus_dir = tmp_path / "docs-corpus"
+    corpus_dir = tmp_path / "docs"
     write_corpus_document(
         corpus_dir, document_id="aaaaaaaaa1", title="Page One", body="Content 1A",
         group="project1", docs={"project": "project1", "page": "page1"},
@@ -355,7 +355,7 @@ def test_docs_loader_ids_are_surrogates_not_paths(tmp_path):
 
 def test_docs_loader_carries_the_docs_block_into_metadata(tmp_path):
     """Nested, not flattened: `Filter` reaches it with a dotted path."""
-    corpus_dir = tmp_path / "docs-corpus"
+    corpus_dir = tmp_path / "docs"
     write_corpus_document(
         corpus_dir, document_id="aaaaaaaaa1", title="Recipes", body="Body.",
         group="stimela",
@@ -374,7 +374,7 @@ def test_docs_loader_carries_the_docs_block_into_metadata(tmp_path):
 
 def test_docs_loader_finds_pages_at_any_nesting_depth(tmp_path):
     """A group is any directory, so upstream nesting survives as groups."""
-    corpus_dir = tmp_path / "docs-corpus"
+    corpus_dir = tmp_path / "docs"
     write_corpus_document(
         corpus_dir, document_id="aaaaaaaaa1", title="Params", body="Nested.",
         group="stimela/fundamentals",
@@ -390,7 +390,7 @@ def test_docs_loader_finds_pages_at_any_nesting_depth(tmp_path):
 def test_docs_loader_body_excludes_frontmatter(tmp_path):
     """Frontmatter is metadata, not searchable prose - indexing it would put
     YAML keys into the lexical leg of every query."""
-    corpus_dir = tmp_path / "docs-corpus"
+    corpus_dir = tmp_path / "docs"
     write_corpus_document(
         corpus_dir, document_id="aaaaaaaaa1", title="Recipes", body="Just the body.",
         group="stimela", docs={"project": "stimela", "page": "recipes"},
@@ -403,7 +403,7 @@ def test_docs_loader_body_excludes_frontmatter(tmp_path):
 
 
 def test_docs_loader_source_path_points_at_the_markdown(tmp_path):
-    corpus_dir = tmp_path / "docs-corpus"
+    corpus_dir = tmp_path / "docs"
     md_path = write_corpus_document(
         corpus_dir, document_id="aaaaaaaaa1", title="Recipes", body="Body.",
         group="stimela", docs={"project": "stimela", "page": "recipes"},
@@ -418,7 +418,7 @@ def test_docs_loader_source_path_points_at_the_markdown(tmp_path):
 
 
 def test_docs_loader_wrapped_document_gets_its_wrapper_as_base_path(tmp_path):
-    corpus_dir = tmp_path / "docs-corpus"
+    corpus_dir = tmp_path / "docs"
     write_corpus_document(
         corpus_dir, document_id="aaaaaaaaa1", title="Recipes",
         body="![fig](diagram.png)", group="stimela",
@@ -436,7 +436,7 @@ def test_docs_loader_wrapped_document_gets_its_wrapper_as_base_path(tmp_path):
 def test_docs_loader_describes_each_project_from_the_pages_themselves(tmp_path):
     """Provenance comes from what was actually indexed, not a side file that
     could disagree with it."""
-    corpus_dir = tmp_path / "docs-corpus"
+    corpus_dir = tmp_path / "docs"
     for index, page in enumerate(("recipes", "cabs"), start=1):
         write_corpus_document(
             corpus_dir, document_id=f"stimela000{index}", title=f"Stimela {page}",
@@ -455,7 +455,7 @@ def test_docs_loader_describes_each_project_from_the_pages_themselves(tmp_path):
 
     sources = DocsLoader(corpus_dir).describe_sources()
 
-    assert sources["corpus_dir"] == "docs-corpus"
+    assert sources["corpus_dir"] == "docs"
     projects = {entry["project"]: entry for entry in sources["projects"]}
     assert projects["stimela"]["page_count"] == 2
     assert projects["stimela"]["version"] == "1.3.0"

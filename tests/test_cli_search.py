@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
+from boepie.config import DOCS_DIR
 from boepie import cli
 from boepie.context import index_root_for
 from boepie.rag import engine
@@ -82,7 +83,9 @@ def _write_context_bundle(bundle_dir: Path) -> None:
 def docs_index(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """A lexical-only docs index under a patched INDEX_DIR."""
     index_dir = tmp_path / "indices"
-    corpus_dir = tmp_path / "docs-corpus"
+    # Named after the real corpus root: `relative_source` anchors on
+    # `DOCS_DIR.name` to cut an absolute source path down.
+    corpus_dir = tmp_path / DOCS_DIR.name
     _write_docs_index(index_dir, corpus_dir)
     monkeypatch.setattr(cli, "INDEX_DIR", index_dir)
     yield index_dir

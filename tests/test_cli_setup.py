@@ -29,8 +29,8 @@ def runner() -> CliRunner:
 @pytest.fixture(autouse=True)
 def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """No network, no developer corpus, no real index root."""
-    monkeypatch.setattr(cli, "LITERATURE_DIR", tmp_path / "literature-corpus")
-    monkeypatch.setattr(cli, "DOCS_DIR", tmp_path / "docs-corpus")
+    monkeypatch.setattr(cli, "LITERATURE_DIR", tmp_path / "literature")
+    monkeypatch.setattr(cli, "DOCS_DIR", tmp_path / "docs")
     monkeypatch.setattr(cli, "NOTES_DIR", tmp_path / "notes")
     monkeypatch.setattr(cli, "INDEX_DIR", tmp_path / "indices")
     monkeypatch.setattr(cli, "sync_literature", MagicMock(return_value=[]))
@@ -78,12 +78,12 @@ def _agents_installed(monkeypatch: pytest.MonkeyPatch) -> None:
 def _seed_corpora(tmp_path: Path) -> None:
     """One boepie-managed document in each machine-global collection."""
     write_corpus_document(
-        tmp_path / "literature-corpus", document_id="litseed001",
+        tmp_path / "literature", document_id="litseed001",
         title="A Paper", body="# A Paper\n\nCalibration.\n",
         bib={"citekey": "smirnov2011"},
     )
     write_corpus_document(
-        tmp_path / "docs-corpus", document_id="docsseed001", title="Guide",
+        tmp_path / "docs", document_id="docsseed001", title="Guide",
         body="# Guide\n\nUsage.\n", group="quartical",
         docs={"project": "quartical", "page": "guide"},
     )
@@ -226,7 +226,7 @@ def _record_index(tmp_path: Path, collection: str, documents: dict[str, str]) ->
     """Put a manifest on disk claiming `documents` were what got indexed."""
     from boepie.rag.loaders import CorpusRevision
 
-    corpus = tmp_path / f"{collection}-corpus"
+    corpus = tmp_path / collection
     index_dir = tmp_path / "indices" / collection / "an-index"
     index_dir.mkdir(parents=True)
     (index_dir / "manifest.json").write_text(

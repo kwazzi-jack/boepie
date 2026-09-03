@@ -28,7 +28,6 @@ wheels/
 # pipeline, and published as built index assets on the release, so they are not
 # carried in git. See design/open-items.md for what that costs (corpus.bib).
 /stimela-corpus/
-/docs-corpus/
 
 # Local data
 data/

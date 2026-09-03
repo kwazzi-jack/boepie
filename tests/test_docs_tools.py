@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from boepie.config import DOCS_DIR
 from boepie.rag import DocsLoader, engine
 from boepie.tools._retrieval import SHORT_SNIPPET_CHARS
 from boepie.tools.docs import (
@@ -103,8 +104,11 @@ def _hit_lines(payload: str) -> list[str]:
 async def docs_index(tmp_path, monkeypatch):
     """Build a stub docs index and make it the default one boepie loads."""
     # Named after the real corpus root so source-path relativisation has its
-    # anchor to cut on, exactly as it would in a real installation.
-    corpus_dir = tmp_path / "deep" / "nested" / "docs-corpus"
+    # anchor to cut on, exactly as it would in a real installation. Derived
+    # rather than spelled out: `relative_source` anchors on `DOCS_DIR.name`,
+    # so a hardcoded name stops matching the moment that directory is renamed
+    # and the test starts asserting on leaked absolute paths.
+    corpus_dir = tmp_path / "deep" / "nested" / DOCS_DIR.name
     _FakeDocs(corpus_dir)
 
     index_root = tmp_path / "index_root"

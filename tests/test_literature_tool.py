@@ -18,6 +18,7 @@ import pytest
 from fastmcp import Client
 from fastmcp.client.transports import FastMCPTransport
 
+from boepie.config import LITERATURE_DIR
 from boepie.rag import embedding as embedding_mod
 from boepie.rag import engine
 from boepie.rag.embedding import ModelBinding
@@ -39,7 +40,11 @@ _FAKE_BINDING = ModelBinding(kind="ollama", model="fake:bow", dim=len(_VOCAB))
 # Mirrors the real corpus layout (full-title filename under the corpus root,
 # surrogate id, nested `bib` block) so the source-path relativisation in
 # _retrieval has its anchor to cut on and the alias map has a citekey to find.
-_CORPUS_ROOT = "/home/someone/.local/share/boepie/literature-corpus"
+# Someone else's home directory on purpose: the point of the relativisation
+# is that an index built elsewhere does not leak the builder's paths. The
+# leaf is derived from the configured directory rather than spelled out, so
+# renaming the corpus directory cannot silently stop this from anchoring.
+_CORPUS_ROOT = f"/home/someone/.local/share/boepie/{LITERATURE_DIR.name}"
 _DOCUMENT_ID = "aB3dE9fGhI"
 _CITEKEY = "kalman2014"
 

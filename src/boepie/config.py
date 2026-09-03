@@ -38,9 +38,6 @@ _SETTINGS = settings.load()
 # Paths
 # ---------------------------------------------------------------------------
 
-# Project root (two levels up from this file: src/boepie/config.py)
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-
 # Where the literature corpus lives: a document per bare-file or
 # same-named-wrapper-directory leaf (see boepie.corpus.layout's recursive
 # group-walking rule), each carrying a surrogate `id` and `managed_by: boepie |
@@ -54,7 +51,7 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 # Markdown is shipped or redistributed by boepie, so every machine builds its
 # own copy of whichever papers its manifest names.
 LITERATURE_DIR: Path = Path(
-    os.environ.get("BOEPIE_LITERATURE_DIR", str(Path(user_data_dir("boepie")) / "literature-corpus"))
+    os.environ.get("BOEPIE_LITERATURE_DIR", str(Path(user_data_dir("boepie")) / "literature"))
 )
 
 # Where the upstream docs corpus lives. One writer only: `boepie corpus add
@@ -65,11 +62,15 @@ LITERATURE_DIR: Path = Path(
 # was removed on 2026-08-20: `DocsLoader` had moved onto the corpus layout and
 # could no longer read anything it wrote.
 #
-# The default is still repo-relative, which is a leftover from that dev-time
-# build and the reason a fresh clone's `docs-corpus/` may hold the old,
-# unreadable layout - re-run `corpus fetch --collection docs` to replace it.
+# Machine-global, like LITERATURE_DIR and NOTES_DIR. It used to default
+# relative to the *installation*, a leftover from that dev-time build, which
+# put the corpus somewhere different for every way of installing boepie: an
+# editable install shared the checkout's `docs-corpus/`, while a plain
+# `pip install` put it inside the venv at `lib/python3.x/docs-corpus` and
+# lost it whenever the venv was rebuilt. A corpus documented as shared by
+# every workspace has to live in one place per machine.
 DOCS_DIR: Path = Path(
-    os.environ.get("BOEPIE_DOCS_DIR", str(_PROJECT_ROOT / "docs-corpus"))
+    os.environ.get("BOEPIE_DOCS_DIR", str(Path(user_data_dir("boepie")) / "docs"))
 )
 
 # Where user-added notes live: same corpus layout as LITERATURE_DIR/DOCS_DIR

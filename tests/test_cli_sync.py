@@ -49,8 +49,8 @@ def _isolate_corpora(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     Both corpus directories point at empty tmp directories, so each index
     build finds nothing and is skipped, and the two calls that would
     otherwise reach arxiv.org and readthedocs.io are stubbed."""
-    monkeypatch.setattr(cli, "LITERATURE_DIR", tmp_path / "literature-corpus-unused")
-    monkeypatch.setattr(cli, "DOCS_DIR", tmp_path / "docs-corpus-unused")
+    monkeypatch.setattr(cli, "LITERATURE_DIR", tmp_path / "literature-unused")
+    monkeypatch.setattr(cli, "DOCS_DIR", tmp_path / "docs-unused")
     monkeypatch.setattr(cli, "sync_literature", MagicMock(return_value=[]))
     monkeypatch.setattr(cli, "sync_docs", MagicMock(return_value=[]))
 

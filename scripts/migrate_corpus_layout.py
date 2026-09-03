@@ -47,10 +47,10 @@ the filename (nested docname subdirectories are removed once emptied).
 old format independently - see CLAUDE.md.
 
 Usage:
-    uv run scripts/migrate_corpus_layout.py literature ~/.local/share/boepie/literature-corpus
-    uv run scripts/migrate_corpus_layout.py docs docs-corpus/
+    uv run scripts/migrate_corpus_layout.py literature ~/.local/share/boepie/literature
+    uv run scripts/migrate_corpus_layout.py docs ~/.local/share/boepie/docs
     uv run scripts/migrate_corpus_layout.py notes ~/.local/share/boepie/notes
-    uv run scripts/migrate_corpus_layout.py literature ~/.local/share/boepie/literature-corpus --dry-run
+    uv run scripts/migrate_corpus_layout.py literature ~/.local/share/boepie/literature --dry-run
 """
 
 from __future__ import annotations
