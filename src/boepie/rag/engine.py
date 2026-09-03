@@ -181,9 +181,12 @@ class IndexFreshness:
     ``unrecorded``    the index predates this check, or was built by a loader
                       that cannot be walked again. Unverifiable, never "fresh".
 
-    Documents *added* since the build appear in none of these counts. They
-    leave the index incomplete rather than wrong, which is the normal state
-    between a `corpus add` and the `index build` that follows it.
+    Documents *added* since the build are counted separately and never make
+    the state `stale`. They leave the index incomplete rather than wrong,
+    which is the normal state between a `corpus add` and the `index build`
+    that follows it - so serving decides on `stale` alone, while a caller
+    asking "is this index complete" (`boepie setup`, `index status`) reads
+    `added` as well.
     """
 
     state: IndexState
@@ -191,6 +194,7 @@ class IndexFreshness:
     document_count: int = 0
     changed: int = 0
     gone: int = 0
+    added: int = 0
 
 
 def index_freshness(
@@ -233,6 +237,7 @@ def index_freshness(
         document_count=len(recorded.documents),
         changed=len(changed),
         gone=len(gone),
+        added=len(set(current.documents) - set(recorded.documents)),
     )
 
 

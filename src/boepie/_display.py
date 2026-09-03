@@ -22,6 +22,9 @@ rather than an unknown style tag rich would silently swallow.
 
 from __future__ import annotations
 
+import contextlib
+from collections.abc import Iterator
+
 import click
 from rich.console import Console
 from rich.highlighter import RegexHighlighter
@@ -336,6 +339,31 @@ def muted(text: str = "", *, lead: str | None = None, indent: str = "") -> None:
     console.print(_line("muted", text, lead, indent))
 
 
+# Set only by `following_steps(False)`. A composite command runs the steps
+# its parts would otherwise be advising, and a sub-command has no way to
+# know it is not the outermost caller.
+_next_steps_wanted = True
+
+
+@contextlib.contextmanager
+def following_steps(wanted: bool) -> Iterator[None]:
+    """Suppress the `Next:` advice inside the block when `wanted` is False.
+
+    `corpus fetch` closes by telling you to run `index build`. Inside
+    `boepie setup` that is advice to do what the next phase does anyway, and
+    twice over for two collections. Suppressing it here keeps the decision
+    with the command that knows it is a composite, rather than teaching four
+    sub-commands to ask whether anyone is above them.
+    """
+    global _next_steps_wanted
+    previous = _next_steps_wanted
+    _next_steps_wanted = wanted
+    try:
+        yield
+    finally:
+        _next_steps_wanted = previous
+
+
 def next_step(
     command: str, *, before: str = "", note: str = "", indent: str = ""
 ) -> None:
@@ -344,6 +372,8 @@ def next_step(
     One helper so the phrasing and the command's styling stay identical
     everywhere; six call sites used to spell it out by hand.
     """
+    if not _next_steps_wanted:
+        return
     preamble = f"{before} " if before else ""
     trailer = f" {note}" if note else ""
     info(f"{preamble}Next: {command}{trailer}", indent=indent)

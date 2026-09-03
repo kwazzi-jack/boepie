@@ -13,7 +13,7 @@ import sys
 import textwrap
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 import tomlkit
@@ -86,6 +86,16 @@ from boepie.docs import DocsProject
 from boepie.docs import load_manifest as load_docs_manifest
 from boepie.literature import ArxivPaper
 from boepie.literature import load_manifest as load_literature_manifest
+from boepie.mcp_config import (
+    DEFAULT_TARGETS,
+    TARGET_NAMES,
+    McpConfigError,
+    TargetResult,
+    apply_target,
+    manual_definition,
+    server_command,
+    target_named,
+)
 from boepie.rag import (
     ContextLoader,
     DocsLoader,
@@ -2382,7 +2392,7 @@ def context_reset(directory: str, yes: bool) -> None:
 _SYNC_COLLECTIONS = ("literature", "docs")
 
 
-def _build_synced_index(collection: str) -> None:
+def _build_synced_index(collection: str, *, indent: str = "") -> None:
     """Build one collection's index during `sync`, skipping an empty corpus.
 
     Hybrid (BM25 + dense), unlike the context bundle's BM25-only index, and
@@ -2403,12 +2413,13 @@ def _build_synced_index(collection: str) -> None:
             )
         )
     except EmptyCollectionError:
-        display.muted(f"nothing to index in '{collection}'", indent="  ")
+        display.muted(f"nothing to index in '{collection}'", indent=indent or "  ")
         return
     display.success(
         f"{manifest.count} chunks into "
         f"'{collection}/{manifest.index_id}' (embedding={manifest.embedding_kind}:{manifest.embedding_model}).",
         lead="Indexed",
+        indent=indent,
     )
 
 
@@ -2535,6 +2546,235 @@ def sync(
 
     if quiet:
         display.success(f"(tag={tag}).", lead="Synced")
+
+
+# ---------------------------------------------------------------------------
+# Setup: one command from a fresh install to a working workspace
+# ---------------------------------------------------------------------------
+
+
+def _active_index_manifest(collection: str) -> dict[str, Any] | None:
+    """The manifest of the index `search` would currently use, if there is one.
+
+    Read off disk rather than rebuilt from configuration, and tolerant of a
+    truncated or foreign file: setup's job here is to decide whether to
+    build, and "I could not read it" is a reason to build, not to abort.
+    """
+    latest = INDEX_DIR / collection / "latest.json"
+    if not latest.is_file():
+        return None
+    try:
+        index_id = json.loads(latest.read_text(encoding="utf-8")).get("index_id")
+        manifest_path = INDEX_DIR / collection / str(index_id) / "manifest.json"
+        loaded = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
+# What setup does about one collection's index, and why. `empty` is a
+# separate answer from `keep` so the reason can be stated before a build is
+# announced rather than after one is abandoned.
+type IndexAction = Literal["build", "rebuild", "keep", "empty"]
+
+
+def _index_plan(collection: str) -> tuple[IndexAction, str]:
+    """Whether this collection's index needs building, and why.
+
+    Wider than what *serving* refuses. `index_freshness` calls an index with
+    new documents beside it `in step`, because incomplete is not wrong and
+    refusing to serve it would break the ordinary `corpus add` -> `index
+    build` gap. Setup is the command that closes that gap, so here an
+    addition counts too.
+    """
+    try:
+        documents = len(_corpus_documents(collection))
+    except (OSError, ValueError, CliError):
+        documents = 0
+    if not documents:
+        return "empty", "no documents yet"
+
+    manifest = _active_index_manifest(collection)
+    if manifest is None:
+        return "build", f"{documents} document(s), no index yet"
+
+    freshness = index_freshness(manifest.get("built_from"), collection)
+    if freshness.state == "stale":
+        counts = ", ".join(
+            part
+            for part in (
+                f"{freshness.changed} changed" if freshness.changed else "",
+                f"{freshness.gone} gone" if freshness.gone else "",
+            )
+            if part
+        )
+        return "rebuild", f"stale - {counts}"
+    if freshness.added:
+        return "rebuild", f"{freshness.added} new document(s)"
+    if freshness.state == "unrecorded":
+        return "rebuild", "built before the freshness check existed"
+    if freshness.state == "corpus absent":
+        return "keep", "corpus not on this machine"
+    return "keep", f"in step with its corpus ({freshness.document_count} document(s))"
+
+
+def _setup_index(collection: str) -> None:
+    """Build one collection's index during setup, or say why it was not."""
+    action, reason = _index_plan(collection)
+    if action in ("keep", "empty"):
+        display.muted(reason, lead=_status_label(collection), indent="  ")
+        return
+    verb = "building" if action == "build" else "rebuilding"
+    display.info(f"{verb} - {reason}", lead=_status_label(collection), indent="  ")
+    _build_synced_index(collection, indent=_STATUS_VALUE_INDENT)
+
+
+def _report_mcp_target(result: TargetResult) -> None:
+    where = str(result.path) if result.path is not None else result.detail
+    if result.status == "written":
+        display.success(f"{result.name} -> {where}", lead="registered", indent="  ")
+    elif result.status == "current":
+        aside = result.detail or "already correct"
+        display.muted(f"{result.name} -> {where} ({aside})", indent="  ")
+    elif result.status == "skipped":
+        display.muted(f"{result.name} - {result.detail}", lead="skipped", indent="  ")
+    else:
+        display.warning(f"{result.name} - {result.detail}", lead="failed", indent="  ")
+
+
+@cli.command()
+@click.option(
+    "--directory",
+    type=click.Path(exists=True, file_okay=False, path_type=str),
+    default=".",
+    show_default=True,
+    help="The workspace to set up.",
+)
+@click.option(
+    "--agents",
+    default=",".join(DEFAULT_TARGETS),
+    show_default=True,
+    type=CollectionList(TARGET_NAMES),
+    help="Comma-separated agents to register the server with, or 'all'. "
+    "The default is every agent whose config stays inside the workspace; "
+    "codex and gemini change user-level config through their own CLIs.",
+)
+@click.option(
+    "--no-corpus",
+    is_flag=True,
+    help="Leave the machine-global literature/docs corpora alone. The first "
+    "fetch takes minutes.",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Replace an existing boepie entry in an agent's config.",
+)
+@click.option(
+    "--tag",
+    default="latest",
+    show_default=True,
+    help="GitHub release tag to fetch the bundle content from.",
+)
+@click.pass_context
+def setup(
+    ctx: click.Context,
+    directory: str,
+    agents: tuple[str, ...],
+    no_corpus: bool,
+    force: bool,
+    tag: str,
+) -> None:
+    """Set up a workspace: context bundle, corpora, indices, MCP launch files.
+
+    The one command between installing boepie and having an agent that can
+    use it, and safe to repeat - every step converges rather than starting
+    over.
+
+    \b
+    context   The `.boepie/` bundle in --directory: created if absent,
+              otherwise converged. Only `managed_by: boepie` files are
+              rewritten; anything you wrote is left byte-for-byte.
+    corpus    The machine-global literature and docs corpora, reconciled
+              against boepie's packaged manifests. A `managed_by: user`
+              document is never touched, and a document already converted is
+              skipped, so a second run costs only what is new.
+    index     Built where there is no index, rebuilt where the corpus has
+              moved under one, kept where it is already in step.
+    agents    The MCP server registration, for each agent actually installed.
+
+    The command written into each config is an absolute path to **this**
+    installation's console script, which is what makes the server able to
+    see stimela: boepie has to be installed in the same venv as stimela, and
+    the config has to name that venv rather than whichever boepie a PATH
+    lookup would find.
+    """
+    target_dir = Path(directory).resolve()
+
+    display.heading("context")
+    _sync_network_step(ctx, fetch, f"context fetch --tag {tag}", False, tag=tag)
+    if (target_dir / ".boepie").exists():
+        ctx.invoke(apply, directory=directory)
+    else:
+        ctx.invoke(init, directory=directory, skills=False, hooks=False)
+
+    if not no_corpus:
+        display.heading("corpus", indent="\n")
+        # `corpus fetch` closes by advising `index build`, which is the very
+        # next phase here - once per collection.
+        with display.following_steps(False):
+            _sync_network_step(
+                ctx,
+                corpus_fetch,
+                f"corpus fetch --collection {','.join(_SYNC_COLLECTIONS)}",
+                False,
+                collections=_SYNC_COLLECTIONS,
+                force_targets=(),
+                delay=None,
+                verbose=False,
+            )
+
+    display.heading("index", indent="\n")
+    for collection in _SYNC_COLLECTIONS:
+        _setup_index(collection)
+
+    display.heading("agents", indent="\n")
+    command = server_command()
+    display.muted(" ".join(command), lead=_status_label("command"), indent="  ")
+    # Two agents can read one file - Claude Code and Copilot CLI both take
+    # `.mcp.json` - so the second is reported as already covered rather than
+    # written a second time.
+    written_by: dict[Path, str] = {}
+    for name in agents:
+        try:
+            result = apply_target(name, target_dir, command, force=force)
+        except McpConfigError as error:
+            result = TargetResult(name, "failed", None, str(error))
+        # Keyed on the target's own file rather than on what the result
+        # carries: a registration made through an agent's CLI reports the
+        # command it ran, not the path that command wrote, and the next
+        # agent reading that same file still needs to be told why it had
+        # nothing to do.
+        shared = target_named(name).relative_path
+        path = target_dir / shared if shared else None
+        if path is not None and path in written_by and result.status != "failed":
+            result = TargetResult(
+                name, "current", path, f"same file as {written_by[path]}"
+            )
+        elif path is not None and result.status in ("written", "current"):
+            written_by[path] = name
+        _report_mcp_target(result)
+
+    uncovered = [name for name in TARGET_NAMES if name not in agents]
+    if uncovered:
+        display.muted("not registered:", indent="\n")
+        for name in uncovered:
+            display.muted(f"{name} - {target_named(name).note}", indent="  ")
+        display.muted(
+            "Add one with --agents, or paste this into any agent boepie "
+            "does not know:"
+        )
+        console.print(manual_definition(command))
 
 
 # ---------------------------------------------------------------------------
