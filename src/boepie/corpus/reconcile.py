@@ -140,7 +140,9 @@ def _delete_document(document: IndexedDocument) -> None:
 @dataclass(frozen=True)
 class LiteratureSyncResult:
     citekey: str
-    action: Literal["added", "skipped", "refetched", "deleted", "unavailable"]
+    action: Literal[
+        "added", "skipped", "refetched", "deleted", "unavailable", "yours"
+    ]
     id: str | None = None
 
 
@@ -214,6 +216,15 @@ def sync_literature(
                 existing_doc is not None
                 and existing_doc.frontmatter.get("managed_by") == "user"
             ):
+                # Reported, not passed over in silence: fetch will never
+                # touch this paper, so a caller told nothing sees a citekey
+                # the manifest names and the corpus does not have, with no
+                # way to find out why.
+                results.append(
+                    LiteratureSyncResult(
+                        citekey=paper.citekey, action="yours", id=existing_doc.id
+                    )
+                )
                 continue
 
             force = paper.citekey in forced_citekeys
@@ -288,7 +299,7 @@ def sync_literature(
 class DocsPageSyncResult:
     project: str
     page: str
-    action: Literal["added", "skipped", "refetched", "deleted", "failed"]
+    action: Literal["added", "skipped", "refetched", "deleted", "failed", "yours"]
     id: str | None = None
     error: str | None = None
 
@@ -301,6 +312,12 @@ class DocsSyncResult:
     refetched: int
     deleted: int
     failures: list[PageResult]
+    # Pages this project's manifest entry names that are `managed_by: user`
+    # on this machine. Counted rather than passed over in silence: fetch
+    # will never touch them, so a caller that does not hear about them sees
+    # a project the manifest claims and the corpus does not have, with no
+    # way to find out why.
+    yours: int = 0
 
 
 def _title_from_markdown(markdown: str, fallback: str) -> str:
@@ -360,7 +377,7 @@ def sync_docs_project(
     }
 
     project_dir = collection_dir / project.project
-    added = skipped = refetched = deleted = 0
+    added = skipped = refetched = deleted = yours = 0
     failures: list[PageResult] = []
     seen_natural_keys: set[str] = set()
 
@@ -402,6 +419,16 @@ def sync_docs_project(
                 existing_doc is not None
                 and existing_doc.frontmatter.get("managed_by") == "user"
             ):
+                yours += 1
+                if on_page is not None:
+                    on_page(
+                        DocsPageSyncResult(
+                            project=project.project,
+                            page=page.docname,
+                            action="yours",
+                            id=existing_doc.id,
+                        )
+                    )
                 continue
 
             force = natural_key in forced_natural_keys
@@ -495,6 +522,7 @@ def sync_docs_project(
         refetched=refetched,
         deleted=deleted,
         failures=failures,
+        yours=yours,
     )
 
 

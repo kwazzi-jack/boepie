@@ -1229,6 +1229,7 @@ def _corpus_fetch_literature(
     skipped = sum(1 for r in results if r.action == "skipped")
     deleted = sum(1 for r in results if r.action == "deleted")
     unavailable = [r for r in results if r.action == "unavailable"]
+    yours = [r for r in results if r.action == "yours"]
 
     console.print(display.collection_root("literature", LITERATURE_DIR), soft_wrap=True)
     display.success(
@@ -1237,6 +1238,17 @@ def _corpus_fetch_literature(
         lead=_status_label("fetched"),
         indent="  ",
     )
+    if yours:
+        # Not a failure and not a skip: fetch is doing what it promises by
+        # leaving these alone. Said out loud because the alternative is a
+        # manifest entry that never appears in the corpus and never explains
+        # itself.
+        display.muted(
+            f"{len(yours)} paper(s) in the manifest are yours and were left alone",
+            lead=_status_label("yours"),
+            indent="  ",
+        )
+        _status_items([result.citekey for result in yours])
     if unavailable:
         display.warning(
             f"{len(unavailable)} paper(s) have no HTML rendering at arxiv.org "
@@ -1290,6 +1302,7 @@ def _corpus_fetch_docs(
     total_skipped = sum(r.skipped for r in results)
     total_deleted = sum(r.deleted for r in results)
     total_failures = sum(len(r.failures) for r in results)
+    total_yours = sum(r.yours for r in results)
 
     console.print(display.collection_root("docs", DOCS_DIR), soft_wrap=True)
     display.success(
@@ -1299,6 +1312,14 @@ def _corpus_fetch_docs(
         lead=_status_label("fetched"),
         indent="  ",
     )
+    if total_yours:
+        yours_projects = sorted(r.project for r in results if r.yours)
+        display.muted(
+            f"{total_yours} page(s) are yours and were left alone "
+            f"({', '.join(yours_projects)})",
+            lead=_status_label("yours"),
+            indent="  ",
+        )
     if total_failures:
         display.warning(
             f"{total_failures} page(s) could not be fetched",
@@ -1433,7 +1454,13 @@ def _corpus_status_one(collection: str, *, first: bool) -> None:
             for document in documents
             if document.frontmatter.get("managed_by") == "boepie"
         }
-        missing = sorted(set(entries) - present)
+        yours = {
+            document.natural_key
+            for document in documents
+            if document.frontmatter.get("managed_by") == "user"
+        }
+        missing = sorted(set(entries) - present - yours)
+        claimed = sorted(set(entries) & yours)
         orphaned = sorted(
             document.natural_key
             for document in documents
@@ -1443,12 +1470,17 @@ def _corpus_status_one(collection: str, *, first: bool) -> None:
         label = "paper"
     else:
         projects = {project.project for project in load_docs_manifest(DOCS_DIR)}
-        fetched_projects = {
-            str(lookup_path(document.frontmatter, "docs.project"))
-            for document in documents
-            if document.frontmatter.get("managed_by") == "boepie"
+        by_management = {
+            managed: {
+                str(lookup_path(document.frontmatter, "docs.project"))
+                for document in documents
+                if document.frontmatter.get("managed_by") == managed
+            }
+            for managed in ("boepie", "user")
         }
-        missing = sorted(projects - fetched_projects)
+        fetched_projects = by_management["boepie"]
+        missing = sorted(projects - fetched_projects - by_management["user"])
+        claimed = sorted(projects & by_management["user"] - fetched_projects)
         orphaned = sorted(fetched_projects - projects - {"None"})
         label = "project"
 
@@ -1459,6 +1491,20 @@ def _corpus_status_one(collection: str, *, first: bool) -> None:
             indent="  ",
         )
         _status_items(missing)
+    if claimed:
+        # Separated from `missing` because the fix is different, and because
+        # a fetch cannot resolve it: these are entries the manifest names
+        # that this machine holds as `managed_by: user`, which `reconcile`
+        # never touches at any step. Calling them "not fetched yet" sent the
+        # reader round a loop - status says fetch, fetch does nothing, status
+        # says fetch.
+        display.muted(
+            f"{len(claimed)} {label}(s) in the manifest are yours here, so "
+            f"fetch leaves them alone",
+            lead=_status_label("yours"),
+            indent="  ",
+        )
+        _status_items(claimed)
     if orphaned:
         display.warning(
             f"{len(orphaned)} {label}(s) no longer in the manifest "
@@ -1475,6 +1521,14 @@ def _corpus_status_one(collection: str, *, first: bool) -> None:
         )
     else:
         display.next_step(f"boepie corpus fetch --collection {collection}", indent="  ")
+    if claimed:
+        # In the value column and kept short, like the "no HTML" advice
+        # above: rich would otherwise break the command across a line end,
+        # which is the one thing a line naming a command must not do.
+        display.info(
+            f"hand back: boepie corpus remove --collection {collection} <id>",
+            indent=_STATUS_VALUE_INDENT,
+        )
 
 
 @corpus.command("list")

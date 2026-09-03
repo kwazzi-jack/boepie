@@ -1056,6 +1056,75 @@ def test_corpus_status_literature_flags_orphaned_documents(
     assert "gone2020" in output
 
 
+def test_corpus_status_calls_a_manifest_paper_you_own_yours_not_missing(
+    runner: CliRunner, tmp_corpus_dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`reconcile` never touches a `managed_by: user` document, so calling it
+    "not fetched yet" sent the reader round a loop: status says fetch, fetch
+    does nothing, status says fetch."""
+    paper = ArxivPaper(
+        citekey="smirnov2011", arxiv_id="1101.1764", title="RIME",
+        authors="O. Smirnov", year="2011",
+    )
+    monkeypatch.setattr(cli, "load_literature_manifest", lambda corpus_dir: [paper])
+    mine = _document(natural_key="smirnov2011", managed_by="user")
+    monkeypatch.setattr(
+        cli, "collection_index", lambda collection_dir, *, collection, key_fields: [mine]
+    )
+
+    result = runner.invoke(cli.cli, ["corpus", "status", "--collection", "literature"])
+
+    assert result.exit_code == 0, result.output
+    output = _plain(result.output)
+    assert "not fetched yet" not in output
+    assert "are yours here" in output
+    assert "smirnov2011" in output
+    # The way out is naming the document, not re-running a fetch that will
+    # skip it again - and the command must survive on one line.
+    assert "corpus remove --collection literature <id>" in output
+
+
+def test_corpus_status_calls_a_docs_project_you_own_yours_not_missing(
+    runner: CliRunner, tmp_corpus_dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The case this was found in: a stimela corpus held as `managed_by: user`
+    reported the whole project missing on every run."""
+    project = DocsProject(project="stimela", base_url="https://stimela.readthedocs.io/en/latest/")
+    monkeypatch.setattr(cli, "load_docs_manifest", lambda corpus_dir: [project])
+    mine = _document(
+        natural_key="stimela/index", managed_by="user",
+        extra={"docs": {"project": "stimela", "page": "index"}},
+    )
+    monkeypatch.setattr(
+        cli, "collection_index", lambda collection_dir, *, collection, key_fields: [mine]
+    )
+
+    result = runner.invoke(cli.cli, ["corpus", "status", "--collection", "docs"])
+
+    assert result.exit_code == 0, result.output
+    output = _plain(result.output)
+    assert "not fetched yet" not in output
+    assert "are yours here" in output
+    assert "stimela" in output
+
+
+def test_corpus_status_still_calls_an_absent_project_missing(
+    runner: CliRunner, tmp_corpus_dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A project with nothing on disk at all is genuinely not fetched, and a
+    fetch is genuinely the fix."""
+    project = DocsProject(project="stimela", base_url="https://stimela.readthedocs.io/en/latest/")
+    monkeypatch.setattr(cli, "load_docs_manifest", lambda corpus_dir: [project])
+    monkeypatch.setattr(
+        cli, "collection_index", lambda collection_dir, *, collection, key_fields: []
+    )
+
+    result = runner.invoke(cli.cli, ["corpus", "status", "--collection", "docs"])
+
+    assert "not fetched yet" in _plain(result.output)
+    assert "are yours here" not in _plain(result.output)
+
+
 def test_corpus_status_docs_reports_page_counts_per_project(
     runner: CliRunner, tmp_corpus_dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch,
 ) -> None:

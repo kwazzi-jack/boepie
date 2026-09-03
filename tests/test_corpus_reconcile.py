@@ -171,6 +171,25 @@ def test_sync_literature_never_touches_a_source_local_paper(tmp_path, monkeypatc
     assert "Hand-edited." in local_path.read_text(encoding="utf-8")
 
 
+def test_sync_literature_reports_a_manifest_paper_that_is_yours(tmp_path, monkeypatch):
+    """The same silence as the docs case: a manifest citekey held here as
+    `managed_by: user` is never fetched, and used to be reported nowhere."""
+    def must_not_be_called(client, citekey, arxiv_id):
+        raise AssertionError("fetch_paper must not be called for a managed_by: user paper")
+    monkeypatch.setattr(reconcile, "fetch_paper", must_not_be_called)
+
+    _write_existing(
+        tmp_path / "My Local Copy.md", document_id="local0001",
+        fields=_lit_fields("smirnov2011", "My Local Copy", managed_by="user"),
+        body="Hand-edited.\n",
+    )
+    manifest = [ArxivPaper(citekey="smirnov2011", arxiv_id="1101.1764", title="RIME", authors="O. Smirnov", year="2011")]
+
+    results = reconcile.sync_literature(tmp_path, manifest, delay=0.0)
+
+    assert [(r.citekey, r.action) for r in results] == [("smirnov2011", "yours")]
+
+
 # ---------------------------------------------------------------------------
 # sync_literature: delete orphans
 # ---------------------------------------------------------------------------
@@ -351,6 +370,38 @@ def test_sync_docs_project_never_touches_a_source_local_page(tmp_path, monkeypat
 
     assert (result.added, result.skipped, result.refetched, result.deleted) == (0, 0, 0, 0)
     assert "Hand-edited." in local_path.read_text(encoding="utf-8")
+
+
+def test_sync_docs_project_counts_the_pages_it_left_alone(tmp_path, monkeypatch):
+    """Leaving a `managed_by: user` page alone is correct; doing it in
+    silence is not. Uncounted, the page shows up nowhere: `fetch` reports
+    nothing about it and `status` called its whole project "not fetched
+    yet", advising a fetch that provably could not act."""
+    _stub_docs_discovery(monkeypatch, [PageContent(docname="index", markdown="# New\n")])
+    _write_existing(
+        tmp_path / "stimela" / "Hand Written.md", document_id="local0001",
+        fields=_docs_fields("stimela", "index", "Hand Written", managed_by="user"),
+        body="Hand-edited.\n",
+    )
+    project = DocsProject(project="stimela", base_url="https://stimela.readthedocs.io/en/latest/")
+
+    seen = []
+    result = reconcile.sync_docs_project(
+        tmp_path, project, delay=0.0, on_page=seen.append
+    )
+
+    assert result.yours == 1
+    assert [page.action for page in seen] == ["yours"]
+    assert seen[0].id == "local0001"
+
+
+def test_sync_docs_project_counts_no_one_elses_pages_as_yours(tmp_path, monkeypatch):
+    _stub_docs_discovery(monkeypatch, [PageContent(docname="index", markdown="# New\n")])
+    project = DocsProject(project="stimela", base_url="https://stimela.readthedocs.io/en/latest/")
+
+    result = reconcile.sync_docs_project(tmp_path, project, delay=0.0)
+
+    assert (result.added, result.yours) == (1, 0)
 
 
 def test_sync_docs_project_deletes_a_boepie_managed_page_no_longer_served(tmp_path, monkeypatch):
