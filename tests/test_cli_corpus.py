@@ -84,7 +84,7 @@ def test_corpus_add_notes_ingests_a_local_markdown_file(
     source = tmp_path / "note.md"
     source.write_text("# My Note\n\nBody.\n", encoding="utf-8")
 
-    result = runner.invoke(cli.cli, ["corpus", "add", "notes", str(source)])
+    result = runner.invoke(cli.cli, ["corpus", "add", "-n", str(source)])
 
     assert result.exit_code == 0, result.output
     assert "added" in result.output
@@ -103,7 +103,7 @@ def test_corpus_add_notes_takes_several_identifiers_at_once(
     second.write_text("# Two\n\nSecond.\n", encoding="utf-8")
 
     result = runner.invoke(
-        cli.cli, ["corpus", "add", "notes", str(first), str(second)]
+        cli.cli, ["corpus", "add", "-n", str(first), str(second)]
     )
 
     assert result.exit_code == 0, result.output
@@ -118,7 +118,7 @@ def test_corpus_add_notes_writes_the_nested_frontmatter_schema(
     source = tmp_path / "note.md"
     source.write_text("# My Note\n\nBody.\n", encoding="utf-8")
 
-    runner.invoke(cli.cli, ["corpus", "add", "notes", str(source)])
+    runner.invoke(cli.cli, ["corpus", "add", "-n", str(source)])
 
     frontmatter, _ = read_frontmatter(
         (tmp_corpus_dirs["notes"] / "My Note.md").read_text(encoding="utf-8")
@@ -140,7 +140,7 @@ def test_corpus_add_notes_warns_when_a_dotfile_title_loses_its_dot(
     source = tmp_path / ".hidden-conventions.md"
     source.write_text("# .hidden-conventions\n\nBody.\n", encoding="utf-8")
 
-    result = runner.invoke(cli.cli, ["corpus", "add", "notes", str(source)])
+    result = runner.invoke(cli.cli, ["corpus", "add", "-n", str(source)])
 
     assert result.exit_code == 0, result.output
     output = _plain(result.output)
@@ -156,7 +156,7 @@ def test_corpus_add_notes_can_suppress_the_dotfile_warning(
     source = tmp_path / ".hidden-conventions.md"
     source.write_text("# .hidden-conventions\n\nBody.\n", encoding="utf-8")
 
-    result = runner.invoke(cli.cli, ["corpus", "add", "notes", str(source)])
+    result = runner.invoke(cli.cli, ["corpus", "add", "-n", str(source)])
 
     assert result.exit_code == 0, result.output
     assert "looked like a dotfile name" not in _plain(result.output)
@@ -170,7 +170,7 @@ def test_corpus_add_notes_places_a_document_in_a_group(
 
     result = runner.invoke(
         cli.cli,
-        ["corpus", "add", "notes", str(source), "--group", "calibration/subtopic"],
+        ["corpus", "add", "-n", str(source), "--group", "calibration/subtopic"],
     )
 
     assert result.exit_code == 0, result.output
@@ -186,9 +186,9 @@ def test_corpus_add_notes_skips_content_already_present(
     are still recognised."""
     source = tmp_path / "note.md"
     source.write_text("# My Note\n\nBody.\n", encoding="utf-8")
-    runner.invoke(cli.cli, ["corpus", "add", "notes", str(source)])
+    runner.invoke(cli.cli, ["corpus", "add", "-n", str(source)])
 
-    result = runner.invoke(cli.cli, ["corpus", "add", "notes", str(source)])
+    result = runner.invoke(cli.cli, ["corpus", "add", "-n", str(source)])
 
     assert result.exit_code == 0, result.output
     assert "already present" in result.output
@@ -202,7 +202,7 @@ def test_corpus_add_notes_fences_a_source_file(
     source = tmp_path / "solver.py"
     source.write_text("def solve():\n    return 1\n", encoding="utf-8")
 
-    runner.invoke(cli.cli, ["corpus", "add", "notes", str(source)])
+    runner.invoke(cli.cli, ["corpus", "add", "-n", str(source)])
 
     text = (tmp_corpus_dirs["notes"] / "solver.py.md").read_text(encoding="utf-8")
     assert "```python" in text
@@ -219,7 +219,7 @@ def test_corpus_add_notes_explains_an_unreadable_binary_rather_than_leaking_a_co
     source = tmp_path / "paper.pdf"
     source.write_bytes(b"%PDF-1.4\n\x8f\x8f binary\n")
 
-    result = runner.invoke(cli.cli, ["corpus", "add", "notes", str(source)])
+    result = runner.invoke(cli.cli, ["corpus", "add", "-n", str(source)])
 
     assert result.exit_code == 1
     assert "codec" not in result.output
@@ -230,7 +230,7 @@ def test_corpus_add_notes_explains_an_unreadable_binary_rather_than_leaking_a_co
 def test_corpus_add_notes_reports_an_unrecognised_identifier(
     runner: CliRunner, tmp_corpus_dirs: dict[str, Path]
 ) -> None:
-    result = runner.invoke(cli.cli, ["corpus", "add", "notes", "not-a-thing"])
+    result = runner.invoke(cli.cli, ["corpus", "add", "-n", "not-a-thing"])
 
     assert result.exit_code == 1
     assert "not an existing file" in result.output
@@ -244,7 +244,7 @@ def test_corpus_add_notes_continues_past_a_failure_in_a_batch(
     good.write_text("# Good\n\nBody.\n", encoding="utf-8")
 
     result = runner.invoke(
-        cli.cli, ["corpus", "add", "notes", "not-a-thing", str(good)]
+        cli.cli, ["corpus", "add", "-n", "not-a-thing", str(good)]
     )
 
     assert result.exit_code == 1  # a failure still fails the run
@@ -278,7 +278,7 @@ def test_corpus_add_literature_accepts_every_arxiv_id_spelling(
     result = runner.invoke(
         cli.cli,
         [
-            "corpus", "add", "literature",
+            "corpus", "add", "-l",
             "2409.19750",
             "arXiv:2409.19751",
             "2409.19752v1.pdf",
@@ -312,7 +312,7 @@ def test_corpus_add_literature_writes_the_bib_block(
     monkeypatch.setattr("boepie.literature.fetch.fetch_paper", fake_fetch)
 
     result = runner.invoke(
-        cli.cli, ["corpus", "add", "literature", "1101.1185", "--citekey", "smirnov2011"]
+        cli.cli, ["corpus", "add", "-l", "1101.1185", "--citekey", "smirnov2011"]
     )
 
     assert result.exit_code == 0, result.output
@@ -356,7 +356,7 @@ def test_corpus_add_literature_keeps_a_bib_entrys_own_citekey(
         encoding="utf-8",
     )
 
-    result = runner.invoke(cli.cli, ["corpus", "add", "literature", str(bib)])
+    result = runner.invoke(cli.cli, ["corpus", "add", "-l", str(bib)])
 
     assert result.exit_code == 0, result.output
     written = list(tmp_corpus_dirs["literature"].glob("*.md"))
@@ -388,11 +388,11 @@ def test_corpus_add_literature_detects_the_same_paper_reached_by_another_route(
     monkeypatch.setattr("boepie.literature.fetch.lookup_arxiv_metadata", fake_lookup)
     monkeypatch.setattr("boepie.literature.fetch.fetch_paper", fake_fetch)
 
-    runner.invoke(cli.cli, ["corpus", "add", "literature", "1805.03410"])
+    runner.invoke(cli.cli, ["corpus", "add", "-l", "1805.03410"])
     calls.clear()
 
     result = runner.invoke(
-        cli.cli, ["corpus", "add", "literature", "https://arxiv.org/abs/1805.03410v2"]
+        cli.cli, ["corpus", "add", "-l", "https://arxiv.org/abs/1805.03410v2"]
     )
 
     assert result.exit_code == 0, result.output
@@ -408,7 +408,7 @@ def test_corpus_add_literature_reports_an_unknown_arxiv_id(
         "boepie.literature.fetch.lookup_arxiv_metadata", lambda arxiv_id: None
     )
 
-    result = runner.invoke(cli.cli, ["corpus", "add", "literature", "9999.99999"])
+    result = runner.invoke(cli.cli, ["corpus", "add", "-l", "9999.99999"])
 
     assert result.exit_code == 1
     assert "no entry" in result.output.lower()
@@ -438,7 +438,7 @@ def test_corpus_add_literature_without_a_terminal_names_both_ways_forward(
     source = tmp_path / "scan.pdf"
     source.write_bytes(b"%PDF-1.7 body")
 
-    result = runner.invoke(cli.cli, ["corpus", "add", "literature", str(source)])
+    result = runner.invoke(cli.cli, ["corpus", "add", "-l", str(source)])
 
     assert result.exit_code == 1
     assert "--yes" in result.output
@@ -460,18 +460,105 @@ def test_corpus_add_literature_hints_at_the_collection_the_review_wrote_to(
     source = tmp_path / "scan.pdf"
     source.write_bytes(b"%PDF-1.7 body")
 
-    result = runner.invoke(cli.cli, ["corpus", "add", "literature", str(source)])
+    result = runner.invoke(cli.cli, ["corpus", "add", "-l", str(source)])
 
     assert result.exit_code == 0, result.output
     assert "index build --collection notes" in _plain(result.output)
     assert list(tmp_corpus_dirs["notes"].rglob("*.md"))
 
 
+def test_corpus_add_needs_a_collection_and_names_every_way_to_give_one(
+    runner: CliRunner, tmp_corpus_dirs: dict[str, Path], tmp_path: Path
+) -> None:
+    """There is no default: which collection a document belongs in is the one
+    thing `add` cannot work out for itself yet."""
+    source = tmp_path / "note.md"
+    source.write_text("# My Note\n\nBody.\n", encoding="utf-8")
+
+    result = runner.invoke(cli.cli, ["corpus", "add", str(source)])
+
+    assert result.exit_code == 1
+    assert "--collection literature|docs|notes" in _plain(result.output)
+    assert "-l/-d/-n" in _plain(result.output)
+
+
+def test_corpus_add_shorthand_and_collection_mean_the_same_thing(
+    runner: CliRunner, tmp_corpus_dirs: dict[str, Path], tmp_path: Path
+) -> None:
+    first = tmp_path / "one.md"
+    second = tmp_path / "two.md"
+    first.write_text("# One\n\nFirst.\n", encoding="utf-8")
+    second.write_text("# Two\n\nSecond.\n", encoding="utf-8")
+
+    short = runner.invoke(cli.cli, ["corpus", "add", "-n", str(first)])
+    spelled = runner.invoke(
+        cli.cli, ["corpus", "add", "--collection", "notes", str(second)]
+    )
+
+    assert short.exit_code == 0, short.output
+    assert spelled.exit_code == 0, spelled.output
+    written = sorted(path.name for path in tmp_corpus_dirs["notes"].glob("*.md"))
+    assert written == ["One.md", "Two.md"]
+
+
+def test_corpus_add_refuses_a_shorthand_that_contradicts_the_collection(
+    runner: CliRunner, tmp_corpus_dirs: dict[str, Path], tmp_path: Path
+) -> None:
+    source = tmp_path / "note.md"
+    source.write_text("# My Note\n\nBody.\n", encoding="utf-8")
+
+    result = runner.invoke(
+        cli.cli, ["corpus", "add", "--collection", "notes", "-l", str(source)]
+    )
+
+    assert result.exit_code == 1
+    assert "name different collections" in _plain(result.output)
+    assert not list(tmp_corpus_dirs["notes"].glob("*.md"))
+
+
+@pytest.mark.parametrize(
+    ("flag", "argument", "collection", "owner"),
+    [
+        ("--project", "quartical", "-n", "docs"),
+        ("--citekey", "smirnov2011", "-n", "literature"),
+        ("--identifier", "1805.03410", "-d", "literature"),
+    ],
+)
+def test_corpus_add_refuses_an_option_that_means_nothing_here(
+    runner: CliRunner, tmp_corpus_dirs: dict[str, Path], tmp_path: Path,
+    flag: str, argument: str, collection: str, owner: str,
+) -> None:
+    """Louder than ignoring it: --citekey on a notes add is someone expecting
+    a citekey to come out the other end."""
+    source = tmp_path / "note.md"
+    source.write_text("# My Note\n\nBody.\n", encoding="utf-8")
+
+    result = runner.invoke(
+        cli.cli, ["corpus", "add", collection, flag, argument, str(source)]
+    )
+
+    assert result.exit_code == 1
+    assert f"{flag} applies to {owner} only" in _plain(result.output)
+
+
+def test_corpus_add_refuses_yes_outside_literature(
+    runner: CliRunner, tmp_corpus_dirs: dict[str, Path], tmp_path: Path
+) -> None:
+    """--yes answers the review buffer, and only literature has one."""
+    source = tmp_path / "note.md"
+    source.write_text("# My Note\n\nBody.\n", encoding="utf-8")
+
+    result = runner.invoke(cli.cli, ["corpus", "add", "-n", "--yes", str(source)])
+
+    assert result.exit_code == 1
+    assert "--yes applies to literature only" in _plain(result.output)
+
+
 def test_corpus_add_docs_requires_a_project(
     runner: CliRunner, tmp_corpus_dirs: dict[str, Path]
 ) -> None:
     result = runner.invoke(
-        cli.cli, ["corpus", "add", "docs", "https://example.org/docs/"]
+        cli.cli, ["corpus", "add", "-d", "https://example.org/docs/"]
     )
 
     assert result.exit_code != 0
@@ -485,7 +572,7 @@ def test_corpus_add_docs_ingests_a_local_file_under_its_project(
     source.write_text("# Manual\n\nBody.\n", encoding="utf-8")
 
     result = runner.invoke(
-        cli.cli, ["corpus", "add", "docs", str(source), "--project", "mytool"]
+        cli.cli, ["corpus", "add", "-d", str(source), "--project", "mytool"]
     )
 
     assert result.exit_code == 0, result.output
@@ -504,7 +591,7 @@ def test_corpus_add_docs_ingests_a_local_file_under_its_project(
 def _add_note(runner: CliRunner, tmp_path: Path, title: str = "My Note") -> str:
     source = tmp_path / f"{title}.md"
     source.write_text(f"# {title}\n\nBody.\n", encoding="utf-8")
-    runner.invoke(cli.cli, ["corpus", "add", "notes", str(source)])
+    runner.invoke(cli.cli, ["corpus", "add", "-n", str(source)])
     return title
 
 
@@ -652,7 +739,7 @@ def test_corpus_remove_deletes_by_id(
 ) -> None:
     source = tmp_path / "note.md"
     source.write_text("# My Note\n\nBody.\n", encoding="utf-8")
-    runner.invoke(cli.cli, ["corpus", "add", "notes", str(source)])
+    runner.invoke(cli.cli, ["corpus", "add", "-n", str(source)])
     frontmatter, _ = read_frontmatter(
         (tmp_corpus_dirs["notes"] / "My Note.md").read_text(encoding="utf-8")
     )
@@ -719,7 +806,7 @@ def test_corpus_fetch_literature_reports_unavailable_papers(
     assert result.exit_code == 0, result.output
     assert "no HTML" in result.output
     assert "perkins2025" in result.output
-    assert "boepie corpus add literature <file.pdf>" in _plain(result.output)
+    assert "boepie corpus add -l <file.pdf>" in _plain(result.output)
 
 
 def test_corpus_fetch_literature_rejects_a_bad_force_target(
@@ -769,7 +856,7 @@ def test_corpus_fetch_explains_why_notes_has_nothing_to_fetch(
     assert result.exit_code == 0, result.output
     output = _plain(result.output)
     assert "no packaged manifest" in output
-    assert "corpus add notes" in output
+    assert "corpus add -n" in output
 
 
 
@@ -1014,7 +1101,7 @@ def test_corpus_add_reports_a_skip_without_failing_the_batch(
 
     monkeypatch.setattr(cli, "add_notes", fake_add_notes)
 
-    result = runner.invoke(cli.cli, ["corpus", "add", "notes", "anything"])
+    result = runner.invoke(cli.cli, ["corpus", "add", "-n", "anything"])
 
     assert result.exit_code == 0, result.output
     assert "skipped" in _plain(result.output)
@@ -1031,7 +1118,7 @@ def test_corpus_add_still_fails_the_batch_on_a_real_failure(
 
     monkeypatch.setattr(cli, "add_notes", fake_add_notes)
 
-    result = runner.invoke(cli.cli, ["corpus", "add", "notes", "anything"])
+    result = runner.invoke(cli.cli, ["corpus", "add", "-n", "anything"])
 
     assert result.exit_code == 1, result.output
 
@@ -1045,7 +1132,7 @@ def test_corpus_add_reports_an_unmatched_pattern_as_a_clean_error(
     (tmp_path / "code").mkdir()
 
     result = runner.invoke(
-        cli.cli, ["corpus", "add", "notes", str(tmp_path / "code" / "*.xyz")]
+        cli.cli, ["corpus", "add", "-n", str(tmp_path / "code" / "*.xyz")]
     )
 
     assert result.exit_code == 1, result.output
@@ -1063,7 +1150,7 @@ def test_corpus_add_notes_expands_a_pattern_the_shell_did_not(
     (source / "a.md").write_text("# A\n\nbody\n", encoding="utf-8")
     (source / "b.md").write_text("# B\n\nbody\n", encoding="utf-8")
 
-    result = runner.invoke(cli.cli, ["corpus", "add", "notes", str(source / "*.md")])
+    result = runner.invoke(cli.cli, ["corpus", "add", "-n", str(source / "*.md")])
 
     assert result.exit_code == 0, result.output
     assert len(list(tmp_corpus_dirs["notes"].glob("*.md"))) == 2
@@ -1081,7 +1168,7 @@ def test_corpus_add_notes_walks_a_folder_into_mirrored_groups(
     (root / "gains" / "README.md").write_text("# Gains\n", encoding="utf-8")
     (root / "gains" / "lib.so").write_bytes(bytes(range(256)))
 
-    result = runner.invoke(cli.cli, ["corpus", "add", "notes", str(root)])
+    result = runner.invoke(cli.cli, ["corpus", "add", "-n", str(root)])
 
     assert result.exit_code == 0, result.output
     notes = tmp_corpus_dirs["notes"]
@@ -1101,7 +1188,7 @@ def test_corpus_add_group_prefixes_a_walked_folder_rather_than_flattening_it(
     (root / "gains" / "a.md").write_text("# A\n", encoding="utf-8")
 
     result = runner.invoke(
-        cli.cli, ["corpus", "add", "notes", str(root), "--group", "quartical"]
+        cli.cli, ["corpus", "add", "-n", str(root), "--group", "quartical"]
     )
 
     assert result.exit_code == 0, result.output

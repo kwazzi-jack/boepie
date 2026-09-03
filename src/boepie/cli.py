@@ -675,8 +675,8 @@ def index_list() -> None:
 # manifest paper's HTML straight from arxiv.org/ar5iv.labs.arxiv.org and
 # converts it locally, so the only thing boepie itself ships is the small
 # bibliographic manifest. Papers with no arXiv presence (pre-arXiv-era, or
-# never preprinted) fall to the BYO-PDF path: `corpus add literature
-# <file.pdf>` against a copy you supply, converted with MinerU.
+# never preprinted) fall to the BYO-PDF path: `corpus add -l <file.pdf>`
+# against a copy you supply, converted with MinerU.
 
 
 def _corpus_collection_dir(collection: str) -> Path:
@@ -766,6 +766,69 @@ def _can_review() -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty()
 
 
+# Each collection's shorthand flag, for naming it back in an error. The
+# options themselves are declared literally on the command.
+_ADD_SHORTHANDS = {"literature": "-l", "docs": "-d", "notes": "-n"}
+
+# Which options mean anything for which destination. `--project` is a docs
+# natural key and the other three are all about establishing a paper's
+# identity, so each is a usage error elsewhere rather than a flag that is
+# quietly ignored.
+_COLLECTION_ONLY_OPTIONS = {
+    "--project": "docs",
+    "--citekey": "literature",
+    "--identifier": "literature",
+    "--yes": "literature",
+}
+
+
+def _add_destination(collection: str | None, shorthand: str | None) -> str:
+    """The one collection this `corpus add` writes to.
+
+    `--collection` here names a destination, not a selection, so it is a
+    single `Choice` rather than the `CollectionList` every other command
+    takes: a document is written to exactly one collection, and `all` would
+    mean nothing.
+    """
+    if collection is not None and shorthand is not None and collection != shorthand:
+        raise CliError(
+            f"--collection {collection} and {_ADD_SHORTHANDS[shorthand]} name "
+            f"different collections. Pass one of them."
+        )
+    chosen = collection or shorthand
+    if chosen is None:
+        raise CliError(
+            "name a collection: --collection literature|docs|notes, or -l/-d/-n."
+        )
+    return chosen
+
+
+def _reject_foreign_add_options(
+    collection: str,
+    *,
+    project: str | None,
+    citekey: str | None,
+    identifier: str | None,
+    accept_review: bool,
+) -> None:
+    """Refuse an option that means nothing for the collection being written.
+
+    Louder than ignoring it: `--citekey` on a notes add is someone expecting
+    a citekey to come out the other end, and silence would let them find out
+    from the corpus instead.
+    """
+    supplied = {
+        "--project": project is not None,
+        "--citekey": citekey is not None,
+        "--identifier": identifier is not None,
+        "--yes": accept_review,
+    }
+    for flag, given in supplied.items():
+        owner = _COLLECTION_ONLY_OPTIONS[flag]
+        if given and owner != collection:
+            raise CliError(f"{flag} applies to {owner} only, not to {collection}.")
+
+
 def _add_and_report(collection: str, adder: Callable[[], list[AddOutcome]]) -> None:
     """Run one `corpus add` and report it.
 
@@ -847,37 +910,67 @@ def _report_add(collection: str, outcomes: list[AddOutcome]) -> None:
         raise SystemExit(1)
 
 
-@corpus.group("add")
-def corpus_add() -> None:
-    """Add documents to a corpus collection, immediately.
-
-    Everything `add` writes is yours (`managed_by: user`) and is never
-    touched by `corpus fetch`, which only reconciles boepie's own packaged
-    manifest. Every subcommand accepts several identifiers at once; run
-    `boepie index build` once when you have finished adding.
-    """
-
-
-@corpus_add.command("literature")
+@corpus.command("add")
 @click.argument("identifiers", nargs=-1, required=True)
-@click.option("--citekey", default=None, help="Override the derived citekey.")
+@click.option(
+    "--collection",
+    type=click.Choice(_CORPUS_COLLECTIONS),
+    default=None,
+    help="Which collection to write to.",
+)
+# The shorthands are one option repeated, click's feature-switch form, so
+# they cannot disagree with each other - only with an explicit --collection,
+# which is checked below.
+@click.option(
+    "-l",
+    "--literature",
+    "shorthand",
+    flag_value="literature",
+    help="Shorthand for --collection literature.",
+)
+@click.option(
+    "-d",
+    "--docs",
+    "shorthand",
+    flag_value="docs",
+    help="Shorthand for --collection docs.",
+)
+@click.option(
+    "-n",
+    "--notes",
+    "shorthand",
+    flag_value="notes",
+    help="Shorthand for --collection notes.",
+)
+@click.option(
+    "--project",
+    default=None,
+    help="docs only, and required there: the group these pages live under, "
+    "and what search_docs filters on.",
+)
+@click.option(
+    "--citekey", default=None, help="literature only: override the derived citekey."
+)
 @click.option(
     "--identifier",
     default=None,
-    help="An arXiv id, DOI or ADS bibcode for a document that does not state "
-    "one on its own first page. Names one paper, so it cannot be combined "
-    "with several inputs.",
+    help="literature only: an arXiv id, DOI or ADS bibcode for a document "
+    "that does not state one on its own first page. Names one paper, so it "
+    "cannot be combined with several inputs.",
 )
 @click.option(
     "--yes",
     "accept_review",
     is_flag=True,
-    help="Skip the review buffer and take the likeliest identifier boepie "
-    "found for each document. What scripts use.",
+    help="literature only: skip the review buffer and take the likeliest "
+    "identifier boepie found for each document. What scripts use.",
 )
 @_add_options
-def corpus_add_literature(
+def corpus_add(
     identifiers: tuple[str, ...],
+    collection: str | None,
+    shorthand: str | None,
+    project: str | None,
     citekey: str | None,
     identifier: str | None,
     accept_review: bool,
@@ -885,104 +978,87 @@ def corpus_add_literature(
     group: str | None,
     keep_original: bool | None,
 ) -> None:
-    """Add papers by arXiv id, DOI, .bib file, PDF, or URL.
+    """Add documents to a corpus collection, immediately.
 
-    An arXiv id is understood in any of its spellings - bare, versioned,
-    `arXiv:`-prefixed, or as an abs/pdf URL - and its HTML is fetched and
-    converted on this machine. A DOI is resolved to an arXiv preprint where
-    one exists. A `.bib` file expands into all of its entries, following each
-    one's arXiv id, DOI, or `file` path in turn: exporting from Zotero and
-    adding the `.bib` is the best-supported way to bring in your own library.
-    PDFs and other documents are converted with MinerU, and each one is then
-    put in front of you in an editor before anything is written: boepie ranks
-    the identifiers it found on the first page, you pick. A document it could
-    not identify arrives pre-set to `notes`, because a literature document
-    without a real identifier is one boepie will not write.
+    Everything `add` writes is yours (`managed_by: user`) and is never
+    touched by `corpus fetch`, which only reconciles boepie's own packaged
+    manifest. Several identifiers at once; run `boepie index build` once when
+    you have finished adding.
+
+    \b
+    literature (-l)  arXiv ids in any spelling, DOIs, .bib files, PDFs, URLs.
+                     A .bib expands into all of its entries, following each
+                     one's arXiv id, DOI or `file` path - exporting from
+                     Zotero is the best-supported way to bring in a library,
+                     since it keeps the citekeys you already cite by. A
+                     converted PDF is put in front of you in an editor first:
+                     boepie ranks the identifiers on its first page, you pick.
+    docs (-d)        A site URL, which crawls the whole site rather than the
+                     one page you name; Sphinx sites are read through their
+                     own object inventory. Needs --project.
+    notes (-n)       The base case: local files of any supported format and
+                     http(s) URLs, converted one page at a time. Machine-
+                     global, separate from a project's `.boepie/` bundle.
     """
+    collection = _add_destination(collection, shorthand)
+    _reject_foreign_add_options(
+        collection,
+        project=project,
+        citekey=citekey,
+        identifier=identifier,
+        accept_review=accept_review,
+    )
+    if collection == "docs" and project is None:
+        raise CliError(
+            "--project is required for docs: it is the group the pages are "
+            "filed under and what search_docs filters on."
+        )
     if identifier is not None and len(identifiers) > 1:
         raise CliError(
             "--identifier names one paper, so it cannot be combined with "
             "several inputs. Add them one at a time, or drop the flag and let "
             "each document be read from its own first page."
         )
+
+    overrides: dict[str, object] = {}
+    if collection == "docs":
+        overrides["project"] = project
+    elif collection == "literature":
+        overrides.update(
+            citekey=citekey,
+            identifier=identifier,
+            accept_review=accept_review,
+            can_review=_can_review(),
+        )
     options = _build_add_options(
-        title=title,
-        group=group,
-        keep_original=keep_original,
-        citekey=citekey,
-        identifier=identifier,
-        accept_review=accept_review,
-        can_review=_can_review(),
-    )
-    _add_and_report(
-        "literature",
-        lambda: add_literature(
-            LITERATURE_DIR,
-            identifiers,
-            options,
-            notes_dir=NOTES_DIR,
-            on_batch=_converting_with_mineru,
-        ),
+        title=title, group=group, keep_original=keep_original, **overrides
     )
 
-
-@corpus_add.command("docs")
-@click.argument("identifiers", nargs=-1, required=True)
-@click.option(
-    "--project",
-    required=True,
-    help="Project name: the group these pages live under, and what "
-    "search_docs filters on.",
-)
-@_add_options
-def corpus_add_docs(
-    identifiers: tuple[str, ...],
-    project: str,
-    title: str | None,
-    group: str | None,
-    keep_original: bool | None,
-) -> None:
-    """Add documentation from a site URL or a local file.
-
-    A URL crawls the whole site, not just the page you name - that is what
-    separates this from `add notes`, which converts a single page. Sphinx
-    sites are detected and read through their own object inventory; anything
-    else is crawled generically.
-    """
-    options = _build_add_options(
-        title=title, group=group, keep_original=keep_original, project=project
-    )
-    _add_and_report(
-        "docs",
-        lambda: add_docs(
-            DOCS_DIR, identifiers, options, on_batch=_converting_with_mineru
-        ),
-    )
-
-
-@corpus_add.command("notes")
-@click.argument("identifiers", nargs=-1, required=True)
-@_add_options
-def corpus_add_notes(
-    identifiers: tuple[str, ...],
-    title: str | None,
-    group: str | None,
-    keep_original: bool | None,
-) -> None:
-    """Add your own files or web pages to the notes corpus.
-
-    The base case: local files of any supported format (Markdown, text,
-    source code, PDF, DOCX, PPTX, XLSX) and http(s) URLs, which are converted
-    to Markdown one page at a time. Notes are machine-global, separate from a
-    project's `.boepie/` bundle.
-    """
-    options = _build_add_options(title=title, group=group, keep_original=keep_original)
-    _add_and_report(
-        "notes",
-        lambda: add_notes(
-            NOTES_DIR, identifiers, options, on_batch=_converting_with_mineru
-        ),
-    )
+    if collection == "literature":
+        _add_and_report(
+            collection,
+            lambda: add_literature(
+                LITERATURE_DIR,
+                identifiers,
+                options,
+                notes_dir=NOTES_DIR,
+                on_batch=_converting_with_mineru,
+            ),
+        )
+    elif collection == "docs":
+        _add_and_report(
+            collection,
+            lambda: add_docs(
+                DOCS_DIR, identifiers, options, on_batch=_converting_with_mineru
+            ),
+        )
+    else:
+        _add_and_report(
+            collection,
+            lambda: add_notes(
+                NOTES_DIR, identifiers, options, on_batch=_converting_with_mineru
+            ),
+        )
 
 
 @corpus.command("remove")
@@ -1088,7 +1164,7 @@ def _corpus_fetch_one(
             "is one you added.",
             lead="Nothing to fetch.",
         )
-        display.info("Add one with: boepie corpus add notes <file-or-url>")
+        display.info("Add one with: boepie corpus add -n <file-or-url>")
         return
     try:
         if collection == "literature":
@@ -1144,9 +1220,7 @@ def _corpus_fetch_literature(
     deleted = sum(1 for r in results if r.action == "deleted")
     unavailable = [r for r in results if r.action == "unavailable"]
 
-    console.print(
-        display.collection_root("literature", LITERATURE_DIR), soft_wrap=True
-    )
+    console.print(display.collection_root("literature", LITERATURE_DIR), soft_wrap=True)
     display.success(
         f"{added} added, {refetched} refetched, "
         f"{skipped} skipped, {deleted} deleted",
@@ -1164,7 +1238,7 @@ def _corpus_fetch_literature(
         # In the value column, so it reads as part of the row above rather
         # than as the command's own closing advice - which the Next: line is.
         display.info(
-            "supply the PDF: boepie corpus add literature <file.pdf>",
+            "supply the PDF: boepie corpus add -l <file.pdf>",
             indent=_STATUS_VALUE_INDENT,
         )
     display.next_step("boepie index build --collection literature", indent="  ")
@@ -1337,7 +1411,7 @@ def _corpus_status_one(collection: str, *, first: bool) -> None:
     if collection == "notes":
         # No manifest to diff against: notes are always yours.
         if not documents:
-            display.next_step("boepie corpus add notes <file-or-url>", indent="  ")
+            display.next_step("boepie corpus add -n <file-or-url>", indent="  ")
         return
 
     if collection == "literature":
@@ -1414,7 +1488,7 @@ def _corpus_list_one(collection: str) -> None:
     documents = _corpus_documents(collection)
     if not documents:
         display.warning(
-            f"Add one with: boepie corpus add {collection} <identifier>",
+            f"Add one with: boepie corpus add --collection {collection} <identifier>",
             lead=f"No documents in '{collection}'.",
         )
         return
@@ -1533,7 +1607,7 @@ def _corpus_tree_one(collection: str) -> None:
     documents = _corpus_documents(collection)
     if not documents:
         display.warning(
-            f"Add one with: boepie corpus add {collection} <identifier>",
+            f"Add one with: boepie corpus add --collection {collection} <identifier>",
             lead=f"No documents in '{collection}'.",
         )
         return

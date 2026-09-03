@@ -148,7 +148,7 @@ def _literature_frontmatter_fields(
     paper: ArxivPaper, fetch_result: FetchResult
 ) -> dict[str, Any]:
     """The frontmatter one fetched paper carries, in the same shape
-    `corpus add literature` writes (`boepie.corpus.add._write`) - only
+    `corpus add -l` writes (`boepie.corpus.add._write`) - only
     `managed_by` differs, which is the whole point of the distinction.
 
     No `sha256`: the arXiv route has no fixed source byte sequence to hash

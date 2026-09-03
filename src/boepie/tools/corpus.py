@@ -98,7 +98,7 @@ async def list_corpus(input: ListCorpusInput) -> str:
     if not documents:
         return (
             f"The '{collection}' collection is empty. "
-            f"Add to it with: boepie corpus add {collection} <identifier>"
+            f"Add to it with: boepie corpus add --collection {collection} <identifier>"
         )
 
     grouped: dict[str, list[IndexedDocument]] = {}

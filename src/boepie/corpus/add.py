@@ -668,7 +668,7 @@ def _add_arxiv_paper(
             detail=(
                 f"arXiv:{arxiv_id} has no HTML rendering at arxiv.org or ar5iv "
                 f"(common for pre-2007 submissions). Supply the PDF instead: "
-                f"boepie corpus add literature <file.pdf>"
+                f"boepie corpus add -l <file.pdf>"
             ),
         )
 
@@ -1110,7 +1110,7 @@ def _write_reviewed_notes(
             AddOutcome(
                 identifier=str(path),
                 status="skipped",
-                detail="moved to notes in the review; add it with `boepie corpus add notes`",
+                detail="moved to notes in the review; add it with `boepie corpus add -n`",
             )
             for path in paths
         ]
@@ -1137,7 +1137,7 @@ def _no_identity_message(identifier: str) -> str:
         f"no arXiv id, DOI or ADS bibcode found on its first page, so it has "
         f"no bibliographic identity and cannot go to literature. Supply one "
         f"with --identifier, or add it as a note instead: "
-        f"boepie corpus add notes '{identifier}'"
+        f"boepie corpus add -n '{identifier}'"
     )
 
 

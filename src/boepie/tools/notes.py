@@ -1,7 +1,7 @@
 """MCP tools for searching and reading user-added notes.
 
 Two tools over the generic ``boepie.rag`` engine, pinned to the ``notes``
-collection: content added via ``boepie corpus add notes`` (local text files,
+collection: content added via ``boepie corpus add -n`` (local text files,
 URLs - see ``boepie.corpus.add``), entirely user content, never
 boepie-curated. The shared F2/F4 rendering lives in ``boepie.tools._retrieval``.
 """
@@ -41,7 +41,7 @@ class SearchNotesInput(BaseModel):
 
 
 async def search_notes(input: SearchNotesInput) -> str:
-    """Search notes added via `boepie corpus add notes` (local files, URLs).
+    """Search notes added via `boepie corpus add -n` (local files, URLs).
 
     Reach for this for content the user pulled in themselves - not part of
     the curated knowledge bundle, the docs corpus, or the literature corpus.

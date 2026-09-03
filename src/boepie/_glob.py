@@ -4,7 +4,7 @@ Two callers want the same semantics for different things: ``--group`` filters
 indexed documents on their group metadata (``rag.models.Filter``), and
 ``corpus add`` expands a pattern into the files it names
 (``corpus.inputs``). They must agree, or ``--group 'quartical/*'`` and
-``corpus add notes 'quartical/*'`` would select different sets from the same
+``corpus add -n 'quartical/*'`` would select different sets from the same
 words.
 
 It lives at the package root rather than in either caller because ``rag``

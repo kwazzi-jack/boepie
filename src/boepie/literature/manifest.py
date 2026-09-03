@@ -3,7 +3,7 @@ literature` converts.
 
 One source only: the packaged ``default_manifest.json`` (tracked in git,
 ships in the wheel). There is deliberately no per-machine user manifest -
-`boepie corpus add literature` writes a `managed_by: user` document straight
+`boepie corpus add -l` writes a `managed_by: user` document straight
 to disk, and `fetch` never touches those, so a second list for the reconciler
 to diff against would only be a source of truth that could drift from the
 documents themselves.
@@ -76,7 +76,7 @@ def load_manifest(corpus_dir: Path) -> list[ArxivPaper]:
 def derive_citekey(authors: str, year: str, title: str) -> str:
     """A short slug in the corpus's existing style (e.g.
     `smirnovRevisitingRadioInterferometer2011`: surname + leading title words +
-    year), so `boepie corpus add literature` can work from just an arXiv id. Collisions
+    year), so `boepie corpus add -l` can work from just an arXiv id. Collisions
     are handled separately by `unique_citekey`."""
     first_author = authors.split(" and ")[0].strip()
     if "," in first_author:
@@ -85,7 +85,7 @@ def derive_citekey(authors: str, year: str, title: str) -> str:
         surname = first_author.split(",")[0].strip()
     else:
         # "First M. Last" - what arXiv's own Atom API returns, and what
-        # `lookup_arxiv_metadata` (the real caller for `corpus add literature`) hands in.
+        # `lookup_arxiv_metadata` (the real caller for `corpus add -l`) hands in.
         # A bare local file has no bibliography at all, so `authors` is empty and
         # there is no name to take a surname from; `_CITEKEY_NO_AUTHOR` below is
         # what that case falls back to.

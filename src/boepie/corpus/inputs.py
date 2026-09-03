@@ -172,7 +172,7 @@ def _walk_directory(
 
     `os.walk` rather than `rglob` so a pruned directory is never descended
     into at all. Symlinks are skipped, both files and directories: a link can
-    point outside the tree the user named, and `boepie corpus add notes code/`
+    point outside the tree the user named, and `boepie corpus add -n code/`
     should mean what is under `code/`, not wherever `code/vendor` aliases to.
     """
     items: list[ResolvedInput] = []

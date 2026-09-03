@@ -198,7 +198,7 @@ async def test_an_empty_collection_says_how_to_fill_it(literature_dir: Path):
     output = await list_corpus(ListCorpusInput(collection="literature"))
 
     assert "empty" in output
-    assert "boepie corpus add literature" in output
+    assert "boepie corpus add --collection literature" in output
 
 
 # ---------------------------------------------------------------------------

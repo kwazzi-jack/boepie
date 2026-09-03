@@ -1,7 +1,7 @@
 # src/boepie/literature/identifiers.py
 """Recognises the many ways a paper can be named.
 
-`boepie corpus add literature` used to pass whatever string it was given
+`boepie corpus add -l` used to pass whatever string it was given
 straight to arXiv's Atom API, so only the bare `2409.19750` form worked -
 `arXiv:2409.19750`, `2409.19750v1.pdf`, and any abs/pdf URL all failed with
 "no arXiv entry found", which reads like the paper does not exist rather than

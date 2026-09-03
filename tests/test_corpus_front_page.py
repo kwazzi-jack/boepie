@@ -263,7 +263,7 @@ def test_without_a_notes_directory_the_move_is_reported_rather_than_guessed(
     outcomes = add_literature(tmp_path / "literature", [_pdf(tmp_path)], _options())
 
     assert [outcome.status for outcome in outcomes] == ["skipped"]
-    assert "boepie corpus add notes" in (outcomes[0].detail or "")
+    assert "boepie corpus add -n" in (outcomes[0].detail or "")
 
 
 def test_a_non_binary_file_with_no_identity_is_refused_with_both_ways_forward(
@@ -279,7 +279,7 @@ def test_a_non_binary_file_with_no_identity_is_refused_with_both_ways_forward(
     detail = outcomes[0].detail or ""
     assert outcomes[0].status == "failed"
     assert "--identifier" in detail
-    assert "boepie corpus add notes" in detail
+    assert "boepie corpus add -n" in detail
 
 
 def test_a_supplied_identifier_lets_an_unidentified_paper_in(

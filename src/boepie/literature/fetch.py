@@ -134,7 +134,7 @@ def fetch_paper(client: httpx.Client, citekey: str, arxiv_id: str) -> FetchResul
 def lookup_arxiv_metadata(arxiv_id: str) -> dict[str, str] | None:
     """Title/authors/year for `arxiv_id` from arXiv's own Atom API.
 
-    Used by `boepie corpus add literature` so a bare arXiv id is enough to build a
+    Used by `boepie corpus add -l` so a bare arXiv id is enough to build a
     manifest entry - no title/author typing required.
     """
     with httpx.Client(headers={"User-Agent": _USER_AGENT}) as client:
