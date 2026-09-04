@@ -507,3 +507,74 @@ def test_the_manual_definition_is_the_common_shape() -> None:
     pasted = json.loads(mcp_config.manual_definition(_COMMAND))
 
     assert pasted == {"boepie": _ENTRY}
+
+
+# ---------------------------------------------------------------------------
+# Driving another tool's CLI: bounded, and never on the user's terminal
+# ---------------------------------------------------------------------------
+
+
+def _recorded_run(recorded: dict[str, object]):
+    """A `subprocess.run` that records its keyword arguments and succeeds."""
+
+    def _run(argv, **kwargs):
+        recorded.update(kwargs)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    return _run
+
+
+def test_registering_through_a_cli_closes_stdin_and_bounds_the_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`capture_output` redirects stdout and stderr but leaves stdin
+    inherited, so a CLI that decides to prompt reads from the terminal the
+    user is watching `setup` in - competing with it for keystrokes, with no
+    answer boepie could give it anyway. The timeout is the backstop for a
+    CLI that blocks on something other than a prompt."""
+    target = mcp_config.target_named("claude")
+    recorded: dict[str, object] = {}
+    monkeypatch.setattr(mcp_config.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(mcp_config.subprocess, "run", _recorded_run(recorded))
+
+    result = mcp_config.register_via_cli(target, tmp_path, _COMMAND)
+
+    assert result.status == "written"
+    assert recorded["stdin"] is subprocess.DEVNULL
+    assert recorded["timeout"] == mcp_config._CLI_TIMEOUT_SECONDS
+    assert recorded["cwd"] == tmp_path
+
+
+def test_a_cli_that_never_finishes_is_cancelled_and_reported(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hung agent CLI must fail this one target and let `setup` carry on to
+    the next - the run ends by printing a definition to paste by hand, which
+    is exactly the fallback a timeout needs."""
+    target = mcp_config.target_named("claude")
+
+    def _hang(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    monkeypatch.setattr(mcp_config.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(mcp_config.subprocess, "run", _hang)
+
+    result = mcp_config.register_via_cli(target, tmp_path, _COMMAND)
+
+    assert result.status == "failed"
+    assert str(mcp_config._CLI_TIMEOUT_SECONDS) in result.detail
+    assert "cancelled" in result.detail
+
+
+def test_probing_for_an_existing_registration_also_closes_stdin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The probe runs on every `setup`, so it has the same two ways to hang
+    as the registration it guards."""
+    recorded: dict[str, object] = {}
+    monkeypatch.setattr(mcp_config.shutil, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(mcp_config.subprocess, "run", _recorded_run(recorded))
+
+    assert mcp_config._already_registered(mcp_config.target_named("codex"), tmp_path)
+    assert recorded["stdin"] is subprocess.DEVNULL
+    assert recorded["timeout"] == mcp_config._CLI_TIMEOUT_SECONDS

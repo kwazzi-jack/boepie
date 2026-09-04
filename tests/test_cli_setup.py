@@ -17,7 +17,6 @@ import pytest
 from click.testing import CliRunner
 
 from boepie import cli
-from boepie.context import ContentFetchResult
 from tests.conftest import write_corpus_document
 
 
@@ -35,15 +34,6 @@ def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "INDEX_DIR", tmp_path / "indices")
     monkeypatch.setattr(cli, "sync_literature", MagicMock(return_value=[]))
     monkeypatch.setattr(cli, "sync_docs", MagicMock(return_value=[]))
-    monkeypatch.setattr(
-        cli,
-        "fetch_content",
-        MagicMock(
-            return_value=ContentFetchResult(
-                content_dir=tmp_path / "content-cache", changed=False
-            )
-        ),
-    )
 
 
 def _installed_except(*absent: str):

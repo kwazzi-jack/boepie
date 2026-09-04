@@ -5,18 +5,22 @@ that back the L2 "curated knowledge" layer of the escalation ladder (section
 2): stable concepts, playbooks, and cab notes, never volatile parameter
 facts. This module owns its on-disk lifecycle -- creating it, converging the
 files boepie manages against a content source, and reporting whether it has
-drifted from the installed cult-cargo/boepie versions and the cached content
--- but not the CLI commands or the BM25 search index built over it; those are
+drifted from the installed cult-cargo/boepie versions and the content they
+ship -- but not the CLI commands or the BM25 search index built over it; those are
 separate concerns.
 
-Curated content reaches a bundle through two channels (design section 4):
-packaged seed files baked into the wheel (offline bootstrap, under
-``context/content/``) and a ``knowledge-content.tar.gz`` release asset
-fetched into a machine-global cache (``fetch_content``). ``resolve_content_source``
-picks whichever is authoritative -- the cache once populated, the seeds
-otherwise -- and both ``init_bundle`` and ``apply_bundle`` copy from it.
-``apply_bundle`` rewrites every ``managed_by: boepie`` file from that source and
-deletes ones whose source counterpart is gone; a user's ``managed_by: user``
+Curated content reaches a bundle through exactly one channel: the seed
+files baked into the wheel, at ``boepie.assets.context_content_dir()``. Both
+``init_bundle`` and ``apply_bundle`` copy from there, so the content a bundle
+carries is the content the installed boepie was built with, and there is
+nothing to fetch, cache or reconcile. (There used to be a second channel - a
+``knowledge-content.tar.gz`` release asset extracted into a machine-global
+cache that was preferred over the seeds. It could disagree with the installed
+boepie, and did: a cache fetched before a frontmatter rename served
+pre-rename content that ``apply_bundle`` then read as the user's own files
+and refused to regenerate, freezing a bundle at an old revision with no
+error to say so.) ``apply_bundle`` rewrites every ``managed_by: boepie``
+file from that source and deletes ones whose source counterpart is gone; a user's ``managed_by: user``
 files are never rewritten or deleted, even when their source counterpart
 disappears -- except when named explicitly via ``apply_bundle``'s
 ``force_paths`` (a scalpel: revert one file at a time, only when boepie still
@@ -26,10 +30,8 @@ blunt instrument: tear the bundle down and rebuild it from nothing).
 
 from __future__ import annotations
 
-import io
 import json
 import shutil
-import tarfile
 import time
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass
@@ -38,9 +40,9 @@ from pathlib import Path
 from typing import Literal
 
 from boepie import __version__ as _installed_boepie_version
-from boepie.config import CONTENT_DIR, bundle_dir_override
+from boepie.assets import asset_checksum, context_content_dir
+from boepie.config import bundle_dir_override
 from boepie.context.frontmatter import read_frontmatter
-from boepie.release import download_verified_asset, fetch_asset_checksum
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -59,15 +61,6 @@ _DERIVED_DIRNAME = ".index"
 _GITIGNORE_FILENAME = ".gitignore"
 _GITIGNORE_LINE = f"{_DERIVED_DIRNAME}/"
 
-# The release asset name `scripts/package_content.py` produces; `fetch_content`
-# downloads exactly this name.
-_CONTENT_ASSET_NAME = "knowledge-content.tar.gz"
-
-# Written at the root of a fetched content cache (by scripts/package_content.py);
-# its absence at CONTENT_DIR means "never fetched, or fetch left it empty",
-# so resolve_content_source() falls back to the packaged seeds.
-_CONTENT_MANIFEST_FILENAME = "content-manifest.json"
-
 # The cult-cargo distribution name on PyPI/uv, confirmed via `uv pip show
 # cult-cargo` (hyphenated; the import name `cultcargo` is not registered).
 _CULTCARGO_DISTRIBUTION_NAME = "cult-cargo"
@@ -76,21 +69,16 @@ _CULTCARGO_DISTRIBUTION_NAME = "cult-cargo"
 # installed in this environment) so callers never see a bare None/KeyError.
 _UNKNOWN_VERSION = "unknown"
 
-# OKF content-schema version for the seed files this package ships, and the
-# content_version recorded whenever the resolved source is the packaged
-# seeds (no content-manifest.json of their own). Bumped when the bundle's
-# directory layout or required frontmatter fields change, independent of
-# boepie's own package version.
-_BUNDLE_VERSION = "0.3.0"
+# OKF content-schema version for the seed files this package ships. Bumped
+# when the bundle's directory layout or required frontmatter fields change,
+# independent of boepie's own package version. 0.4.0 dropped the manifest's
+# `content_version` field for `content_sha256` (see `BundleManifest`).
+_BUNDLE_VERSION = "0.4.0"
 
 _POINTER_LINE = (
     "Stimela knowledge base in `.boepie/`: start at `.boepie/index.md`, "
     "or call `search_context`."
 )
-
-
-def _seed_content_dir() -> Path:
-    return Path(__file__).resolve().parent / "content"
 
 
 def _cultcargo_version() -> str:
@@ -169,120 +157,6 @@ def ensure_gitignore(bundle_dir: Path) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Content source: packaged seeds vs fetched cache
-# ---------------------------------------------------------------------------
-
-
-def _is_populated_content_cache(candidate_dir: Path) -> bool:
-    """A cache counts as populated once it carries its own manifest.
-
-    Guards against a half-extracted or never-fetched CONTENT_DIR being
-    mistaken for real content.
-    """
-    return (candidate_dir / _CONTENT_MANIFEST_FILENAME).is_file()
-
-
-def _content_version_for(source_dir: Path) -> str:
-    manifest_path = source_dir / _CONTENT_MANIFEST_FILENAME
-    if not manifest_path.exists():
-        return _BUNDLE_VERSION
-    manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
-    return str(manifest_data.get("content_version", _BUNDLE_VERSION))
-
-
-def _version_tuple(version: str) -> tuple[int, ...]:
-    """Parse a dotted version for ordering. An unparseable component sorts as
-    0, so a malformed version is treated as old rather than as newest."""
-    parts: list[int] = []
-    for component in version.split("."):
-        try:
-            parts.append(int(component))
-        except ValueError:
-            parts.append(0)
-    return tuple(parts)
-
-
-def _cache_is_current(candidate_dir: Path) -> bool:
-    """Whether a populated cache was built against the current content schema.
-
-    `_BUNDLE_VERSION` is bumped whenever the bundle's required frontmatter
-    fields change, and a cache predating such a bump carries the *old* field
-    names. That is worse than merely stale: `apply_bundle` decides what it may
-    regenerate by asking whether a file is `managed_by: boepie`, so pre-rename
-    content reads as the user's own and is left untouched forever - a bundle
-    frozen at an old revision with no error to say so. Falling back to the
-    packaged seeds is the safe answer.
-    """
-    return _version_tuple(_content_version_for(candidate_dir)) >= _version_tuple(
-        _BUNDLE_VERSION
-    )
-
-
-def resolve_content_source() -> Path:
-    """Return the content directory `init_bundle`/`apply_bundle` copy from.
-
-    Prefers the machine-global fetched cache (`CONTENT_DIR`) once it is
-    populated *and* current; falls back to the packaged seeds shipped in the
-    wheel otherwise, so a bundle can always be created/converged offline and
-    is never built from content older than this boepie understands.
-    """
-    if _is_populated_content_cache(CONTENT_DIR) and _cache_is_current(CONTENT_DIR):
-        return CONTENT_DIR
-    return _seed_content_dir()
-
-
-@dataclass
-class ContentFetchResult:
-    content_dir: Path
-    changed: bool
-
-
-def _content_digest_path() -> Path:
-    """Sidecar recording the sha256 of the tarball last fetched into
-    `CONTENT_DIR`, so a later `fetch_content` can tell the cache is still
-    current from the release's small `.sha256` file alone, without
-    re-downloading the (much larger) tarball body."""
-    return CONTENT_DIR.parent / f".{CONTENT_DIR.name}.sha256"
-
-
-def fetch_content(tag: str = "latest") -> ContentFetchResult:
-    """Bring `CONTENT_DIR` up to date with `knowledge-content.tar.gz` from a GitHub release.
-
-    Checks the release's `.sha256` sidecar first (one small request); if it
-    matches the digest recorded from the cache's last successful fetch, the
-    tarball download is skipped entirely and `changed=False` is returned.
-    Otherwise downloads and checksum-verifies via `boepie.release`, extracting
-    into a sibling staging directory that swaps into place only once
-    complete, so an interrupted download never leaves a half-extracted cache
-    behind; any previously cached content is replaced outright.
-    """
-    remote_digest = fetch_asset_checksum(tag, _CONTENT_ASSET_NAME)
-    digest_path = _content_digest_path()
-
-    if (
-        _is_populated_content_cache(CONTENT_DIR)
-        and digest_path.is_file()
-        and digest_path.read_text(encoding="utf-8").strip() == remote_digest
-    ):
-        return ContentFetchResult(content_dir=CONTENT_DIR, changed=False)
-
-    archive_bytes = download_verified_asset(tag, _CONTENT_ASSET_NAME, expected_digest=remote_digest)
-
-    staging_dir = CONTENT_DIR.parent / f".{CONTENT_DIR.name}.fetch-staging"
-    if staging_dir.exists():
-        shutil.rmtree(staging_dir)
-    staging_dir.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:gz") as tar:
-        tar.extractall(staging_dir, filter="data")
-
-    if CONTENT_DIR.exists():
-        shutil.rmtree(CONTENT_DIR)
-    staging_dir.rename(CONTENT_DIR)
-    digest_path.write_text(remote_digest, encoding="utf-8")
-    return ContentFetchResult(content_dir=CONTENT_DIR, changed=True)
-
-
-# ---------------------------------------------------------------------------
 # Manifest
 # ---------------------------------------------------------------------------
 
@@ -292,7 +166,13 @@ class BundleManifest:
     bundle_version: str
     cultcargo_version: str
     boepie_version: str
-    content_version: str
+    # sha256 of the whole content tree this bundle was generated from, which
+    # is what lets `bundle_status` say "the content moved under you, run
+    # apply". A version string cannot: the content ships in the wheel, so the
+    # only hand-maintained number that could track it is boepie's own, and in
+    # an editable checkout (where `.boepie/` is regenerated from
+    # `src/boepie/context/content/`) that never changes at all.
+    content_sha256: str
     generated_at: str
 
     def to_dict(self) -> dict[str, str]:
@@ -304,7 +184,7 @@ def _current_manifest(source_dir: Path) -> BundleManifest:
         bundle_version=_BUNDLE_VERSION,
         cultcargo_version=_cultcargo_version(),
         boepie_version=_installed_boepie_version,
-        content_version=_content_version_for(source_dir),
+        content_sha256=asset_checksum(source_dir),
         generated_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     )
 
@@ -317,12 +197,54 @@ def _write_manifest(bundle_dir: Path, source_dir: Path) -> BundleManifest:
 
 
 def _read_manifest(bundle_dir: Path) -> BundleManifest:
+    """The bundle's own manifest, or an error naming the command that fixes it.
+
+    Three ways this file can be unusable, and all three end the same way -
+    named, with `boepie context apply` beside them, because `apply` writes
+    the manifest rather than reading it and so fixes every one of them.
+    - **Unparseable**, from a write interrupted partway. `json`'s own error
+      names a column and nothing else: not the file, not the bundle, not the
+      fix.
+    - **Not an object** at all, which `BundleManifest(**data)` would answer
+      with a `TypeError` about argument unpacking.
+    - **Written by an older boepie**, so the fields differ (`0.3.0` carried
+      `content_version` where `0.4.0` carries `content_sha256`). Rejecting it
+      is right - the two are not derivable from each other, and guessing
+      would be inventing state - but a bare `TypeError` three frames down
+      names neither the cause nor the cure.
+
+    `is_bundle_dir` deliberately does not do these checks: it asks only
+    whether a `.boepie/` is a real bundle rather than a stray directory, and
+    a bundle with a damaged manifest is still this project's bundle. Failing
+    here, where the manifest is actually needed, keeps `find_bundle` from
+    walking past a damaged bundle to a different project's.
+    """
     manifest_path = bundle_dir / _MANIFEST_FILENAME
     if not manifest_path.exists():
         raise FileNotFoundError(
             f"No manifest at {manifest_path}. Run `boepie context init` first."
         )
-    return BundleManifest(**json.loads(manifest_path.read_text(encoding="utf-8")))
+    try:
+        manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as error:
+        raise ValueError(
+            f"The manifest at {manifest_path} is not readable JSON ({error}). "
+            f"Run `boepie context apply` to rewrite it."
+        ) from error
+    if not isinstance(manifest_data, dict):
+        raise ValueError(
+            f"The manifest at {manifest_path} is not a JSON object. "
+            f"Run `boepie context apply` to rewrite it."
+        )
+    try:
+        return BundleManifest(**manifest_data)
+    except TypeError as error:
+        recorded_version = manifest_data.get("bundle_version", "unknown")
+        raise ValueError(
+            f"The bundle at {bundle_dir} was written by an older boepie "
+            f"(bundle_version {recorded_version}, this one writes "
+            f"{_BUNDLE_VERSION}). Run `boepie context apply` to rewrite it."
+        ) from error
 
 
 # ---------------------------------------------------------------------------
@@ -363,9 +285,8 @@ def _prepend_log_entry(log_path: Path, message: str) -> None:
 
 # Files that live under a content source but are not themselves bundle
 # content to copy -- apply-log.md is append-only bundle history (see
-# _prepend_log_entry) and content-manifest.json only describes the source
-# itself, not a bundle document.
-_NON_CONTENT_SOURCE_NAMES = frozenset({_LOG_FILENAME, _CONTENT_MANIFEST_FILENAME})
+# _prepend_log_entry), never a document to converge.
+_NON_CONTENT_SOURCE_NAMES = frozenset({_LOG_FILENAME})
 
 # Files that live directly under a bundle but are never source-managed
 # content -- manifest.json, apply-log.md and .gitignore are bundle-lifecycle
@@ -494,7 +415,7 @@ def init_bundle(target_dir: Path) -> BundleManifest:
             f"Bundle already exists at {bundle_dir}. Use `boepie context apply` instead."
         )
 
-    source_dir = resolve_content_source()
+    source_dir = context_content_dir()
     bundle_dir.mkdir(parents=True)
     _copy_managed_files(bundle_dir, source_dir)
     ensure_gitignore(bundle_dir)
@@ -503,7 +424,7 @@ def init_bundle(target_dir: Path) -> BundleManifest:
     _prepend_log_entry(
         bundle_dir / _LOG_FILENAME,
         f"bundle initialized (boepie {manifest.boepie_version}, "
-        f"cult-cargo {manifest.cultcargo_version}, content {manifest.content_version})",
+        f"cult-cargo {manifest.cultcargo_version}, content {manifest.content_sha256[:12]})",
     )
     return manifest
 
@@ -564,9 +485,9 @@ def apply_bundle(
     `force_paths`, which are reverted back to boepie-managed even though they
     are currently `managed_by: user`.
 
-    Callers choose `source_dir` explicitly -- normally `resolve_content_source()`
-    -- so convergence against an arbitrary directory (e.g. in tests) is also
-    possible. `force_paths` entries are bundle-root-relative (an optional
+    Callers choose `source_dir` explicitly -- normally
+    `boepie.assets.context_content_dir()` -- so convergence against an
+    arbitrary directory (e.g. in tests) is also possible. `force_paths` entries are bundle-root-relative (an optional
     leading `.boepie/` is stripped); every target is validated up front, so a
     bad one raises `ValueError` before anything is written.
     """
@@ -586,7 +507,7 @@ def apply_bundle(
 
     log_message = (
         f"bundle applied (boepie {manifest.boepie_version}, "
-        f"cult-cargo {manifest.cultcargo_version}, content {manifest.content_version}); "
+        f"cult-cargo {manifest.cultcargo_version}, content {manifest.content_sha256[:12]}); "
         f"rewrote {len(rewritten_paths)} file(s)"
     )
     if deleted_paths:
@@ -653,25 +574,25 @@ class BundleStatus:
     manifest: BundleManifest
     installed_cultcargo_version: str
     installed_boepie_version: str
-    resolved_content_version: str
+    installed_content_sha256: str
 
 
 def bundle_status(target_dir: Path) -> BundleStatus:
     """Three-way comparison: bundle manifest vs installed versions vs the
-    currently resolvable content source (cache when populated, else seeds).
+    content the installed boepie ships.
 
-    Stays offline (design section 7: `status` never touches the network), so
-    it cannot see a newer release sitting upstream that has never been
-    fetched -- only drift the bundle can already detect locally: an installed
-    cult-cargo/boepie version different from what the bundle was generated
-    against, or a content source that has moved on since the last `apply`.
+    Every term is local - the content is in the venv, not on a release - so
+    this is the whole truth rather than an offline approximation of it: an
+    installed cult-cargo/boepie version different from what the bundle was
+    generated against, or a content tree whose digest has moved since the
+    last `apply`.
     """
     bundle_dir = target_dir / _BUNDLE_DIRNAME
     manifest = _read_manifest(bundle_dir)
 
     installed_cultcargo_version = _cultcargo_version()
     installed_boepie_version = _installed_boepie_version
-    resolved_content_version = _content_version_for(resolve_content_source())
+    installed_content_sha256 = asset_checksum(context_content_dir())
 
     mismatches: list[str] = []
     if manifest.bundle_version != _BUNDLE_VERSION:
@@ -687,10 +608,11 @@ def bundle_status(target_dir: Path) -> BundleStatus:
         mismatches.append(
             f"boepie_version {manifest.boepie_version} != installed {installed_boepie_version}"
         )
-    if manifest.content_version != resolved_content_version:
+    if manifest.content_sha256 != installed_content_sha256:
         mismatches.append(
-            f"content_version {manifest.content_version} != resolved "
-            f"{resolved_content_version}: bundle behind cache: run `boepie context apply`"
+            f"content_sha256 {manifest.content_sha256[:12]} != installed "
+            f"{installed_content_sha256[:12]}: bundle behind the content this "
+            "boepie ships: run `boepie context apply`"
         )
 
     if mismatches:
@@ -700,16 +622,16 @@ def bundle_status(target_dir: Path) -> BundleStatus:
             manifest=manifest,
             installed_cultcargo_version=installed_cultcargo_version,
             installed_boepie_version=installed_boepie_version,
-            resolved_content_version=resolved_content_version,
+            installed_content_sha256=installed_content_sha256,
         )
 
     return BundleStatus(
         state="current",
-        detail="bundle matches installed versions and resolved content",
+        detail="bundle matches the installed versions and the content they ship",
         manifest=manifest,
         installed_cultcargo_version=installed_cultcargo_version,
         installed_boepie_version=installed_boepie_version,
-        resolved_content_version=resolved_content_version,
+        installed_content_sha256=installed_content_sha256,
     )
 
 

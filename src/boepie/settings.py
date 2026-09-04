@@ -264,7 +264,16 @@ class PipelineSettings(BaseModel):
 
 
 class SyncSettings(BaseModel):
-    """Staleness nudges. boepie never self-updates or schedules OS-level jobs."""
+    """Staleness nudges. boepie never self-updates or schedules OS-level jobs.
+
+    NOT IMPLEMENTED. Declared for future development and listed in
+    `_DEFERRED_SECTIONS`, so none of these keys appears in `config show` or
+    `config create` and none can be set. Nothing reads any of them: there is
+    no staleness check, no nudge, and no version lookup. Kept because the
+    shape of the setting is the decision that was made - what would be
+    tunable if the feature existed - and re-deriving that later is the
+    expensive part.
+    """
 
     auto_sync: bool = Field(
         False, description="Run a stale sync automatically instead of only printing a nudge."
@@ -275,6 +284,26 @@ class SyncSettings(BaseModel):
     check_boepie_version: bool = Field(
         True, description="Check GitHub for a newer boepie and print an upgrade nudge."
     )
+
+
+# Sections the schema declares but nothing yet reads. They are hidden from
+# every surface that would present them as usable - `config show`,
+# `config create`, `config get`/`set` - because a setting a user can change
+# and boepie then ignores is worse than no setting at all: it reads as a
+# switch that is broken rather than as a feature that is absent. The models
+# stay declared so the intended shape is not lost; delete a name from here
+# when the code that honours it lands.
+_DEFERRED_SECTIONS = frozenset({"sync"})
+
+
+def is_deferred_section(section: str) -> bool:
+    """Whether `section` is declared but not yet honoured by any code."""
+    return section in _DEFERRED_SECTIONS
+
+
+def deferred_key(key: str) -> bool:
+    """Whether a dotted key belongs to a section reserved for future work."""
+    return is_deferred_section(key.partition(".")[0])
 
 
 class InstructionsSettings(BaseModel):
@@ -371,8 +400,13 @@ class BoepieSettings(BaseSettings):
 def _iter_schema_keys(
     settings_cls: type[BaseSettings] = BoepieSettings,
 ) -> Iterator[tuple[str, str]]:
-    """Every (section, key) pair the schema declares, in declaration order."""
+    """Every (section, key) pair the schema declares and honours, in
+    declaration order. A `_DEFERRED_SECTIONS` section is skipped, which is
+    what keeps it out of `known_keys`, `resolve_settings` and so out of
+    `config show`/`get`/`set`."""
     for section, section_field in settings_cls.model_fields.items():
+        if is_deferred_section(section):
+            continue
         section_model = section_field.annotation
         if section_model is None or not issubclass(section_model, BaseModel):
             continue
@@ -571,6 +605,8 @@ def render_default_config() -> str:
     lines = [f"# {line}".rstrip() for line in _FILE_HEADER.splitlines()]
 
     for section, section_field in BoepieSettings.model_fields.items():
+        if is_deferred_section(section):
+            continue
         section_model = section_field.annotation
         if section_model is None or not issubclass(section_model, BaseModel):
             continue

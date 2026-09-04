@@ -210,14 +210,11 @@ def test_context_apply_force_reverts_a_source_local_file(
     """A hand-edited, managed_by: user seed file gets reverted byte-for-byte by
     --force, and the apply-log.md records the force-revert distinctly.
 
-    Content cache pinned to an empty directory so `resolve_content_source()`
-    falls back to the packaged seeds, independent of whatever a developer's
-    machine happens to have cached at BOEPIE_CONTENT_DIR.
+    The content it is reverted to is the installed package's own, which is
+    the only source there is - no machine-global cache can stand in front of
+    it any more.
     """
-    with (
-        patch("boepie.cli.INDEX_DIR", tmp_index_dir),
-        patch("boepie.context.bundle.CONTENT_DIR", tmp_path / "content-cache-unset"),
-    ):
+    with patch("boepie.cli.INDEX_DIR", tmp_index_dir):
         assert runner.invoke(cli.cli, ["context", "init", "--directory", str(tmp_path)]).exit_code == 0
 
         concept_path = tmp_path / ".boepie" / "concepts" / "skeleton.md"
@@ -236,9 +233,9 @@ def test_context_apply_force_reverts_a_source_local_file(
 
     assert result.exit_code == 0, result.output
 
-    from boepie.context.bundle import _seed_content_dir
+    from boepie.assets import context_content_dir
 
-    seed_bytes = (_seed_content_dir() / "concepts" / "skeleton.md").read_bytes()
+    seed_bytes = (context_content_dir() / "concepts" / "skeleton.md").read_bytes()
     assert concept_path.read_bytes() == seed_bytes
 
     log_text = (tmp_path / ".boepie" / "apply-log.md").read_text(encoding="utf-8")

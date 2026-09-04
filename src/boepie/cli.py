@@ -52,17 +52,16 @@ from boepie.config import (
     MINERU_MODEL_SOURCE,
     NOTES_DIR,
 )
+from boepie.assets import context_content_dir
 from boepie.context import (
     append_agents_pointer,
     apply_bundle,
     bundle_status,
-    fetch_content,
     find_bundle,
     index_root_for,
     init_bundle,
     list_source_local_files,
     reset_bundle,
-    resolve_content_source,
 )
 from boepie.corpus import collection_index, sync_docs, sync_literature
 from boepie.corpus.add import (
@@ -2234,45 +2233,7 @@ def _note_legacy_global_index() -> None:
 
 @cli.group()
 def context() -> None:
-    """Manage the `.boepie/` context bundle (fetch, init, apply, status, reset)."""
-
-
-@context.command()
-@click.option(
-    "--tag",
-    default="latest",
-    show_default=True,
-    help="GitHub release tag to fetch from.",
-)
-def fetch(tag: str) -> None:
-    """Bring the local content cache up to date with a GitHub release.
-
-    The cache is machine-global, shared by all `.boepie/` bundles. Cached
-    content is preferred by `apply` over packaged seeds. Checks the
-    release's `.sha256` sidecar first and skips the (much larger) tarball
-    download when the cache already matches it.
-    """
-    with console.status(f"Checking knowledge-content.tar.gz from release {tag}..."):
-        try:
-            result = fetch_content(tag=tag)
-        except ValueError as error:
-            display.error(str(error))
-            raise SystemExit(1) from error
-
-    content_dir = result.content_dir
-    manifest_path = content_dir / "content-manifest.json"
-    content_version = (
-        json.loads(manifest_path.read_text(encoding="utf-8")).get("content_version")
-        if manifest_path.exists()
-        else None
-    )
-    version_note = f", content_version={content_version}" if content_version else ""
-    if result.changed:
-        display.success(
-            f"content (tag={tag}{version_note}) into {content_dir}.", lead="Fetched"
-        )
-    else:
-        display.success(f"(tag={tag}{version_note}).", lead="Content up to date")
+    """Manage the `.boepie/` context bundle (init, apply, status, reset)."""
 
 
 @context.command()
@@ -2288,8 +2249,8 @@ def fetch(tag: str) -> None:
 def init(directory: str, skills: bool, hooks: bool) -> None:
     """Initialize the `.boepie/` context bundle.
 
-    Creates the bundle from the resolved content source (cached content when
-    available, else packaged seeds), appends the bundle pointer to AGENTS.md,
+    Creates the bundle from the content this boepie ships (in the venv it is
+    installed in - nothing is downloaded), appends the pointer to AGENTS.md,
     and builds the BM25 search index into the bundle's own `.index/`
     (git-ignored, so the committable bundle carries no derived state).
     """
@@ -2334,20 +2295,19 @@ def init(directory: str, skills: bool, hooks: bool) -> None:
     ),
 )
 def apply(directory: str, force_targets: tuple[str, ...]) -> None:
-    """Converge the bundle with the resolved content source.
+    """Converge the bundle with the content this boepie ships.
 
-    Rewrites every `managed_by: boepie` file from the resolved source (cached
-    content when available, else packaged seeds), deletes orphaned boepie-managed
-    files, preserves every `managed_by: user` file byte-for-byte, and rebuilds the
-    bundle's own BM25 search index under `.boepie/.index/`. Pass --force with
+    Rewrites every `managed_by: boepie` file from the content in the venv
+    boepie is installed in, deletes orphaned boepie-managed files, preserves
+    every `managed_by: user` file byte-for-byte, and rebuilds the bundle's
+    own BM25 search index under `.boepie/.index/`. Pass --force with
     one or more bundle-relative paths to revert specific `managed_by: user`
     files back to boepie-managed instead (see `context reset` to discard
     every local file at once).
     """
     target_dir = Path(directory).resolve()
     try:
-        source_dir = resolve_content_source()
-        apply_bundle(target_dir, source_dir, force_paths=force_targets)
+        apply_bundle(target_dir, context_content_dir(), force_paths=force_targets)
     except (FileNotFoundError, ValueError) as error:
         raise CliError(str(error)) from error
 
@@ -2371,7 +2331,7 @@ def status(directory: str) -> None:
     target_dir = Path(directory).resolve()
     try:
         status_result = bundle_status(target_dir)
-    except FileNotFoundError as error:
+    except (FileNotFoundError, ValueError) as error:
         raise CliError(str(error)) from error
 
     report = display.success if status_result.state == "current" else display.warning
@@ -2433,8 +2393,8 @@ def context_reset(directory: str, yes: bool) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Sync: composite bootstrap (context fetch -> corpus fetch -> index build
-# -> context apply/init)
+# Sync: composite bootstrap (corpus fetch -> index build -> context
+# apply/init)
 # ---------------------------------------------------------------------------
 
 
@@ -2482,9 +2442,8 @@ def _quiet(enabled: bool):
     """Swallow everything `console` prints inside the block when `enabled`.
 
     Used by `sync`'s default (non-verbose) run so its component steps -
-    `context fetch`, `corpus fetch`, `index build`, `apply`/`init` - stay
-    silent and sync can report a single summary line instead of each step's
-    own output.
+    `corpus fetch`, `index build`, `apply`/`init` - stay silent and sync can
+    report a single summary line instead of each step's own output.
     """
     if not enabled:
         yield
@@ -2500,9 +2459,10 @@ def _sync_network_step(
     quiet: bool,
     **params: object,
 ) -> None:
-    """Run one network step of `sync` and turn a failure into a warning
-    instead of aborting, so the offline convergence step that follows still
-    runs against whatever content or indices are already cached or packaged.
+    """Run the network step of `sync`/`setup` - the corpus fetch, now the only
+    one - and turn a failure into a warning instead of aborting, so the
+    convergence steps that follow still run against whatever was previously
+    fetched and against the content in the venv.
 
     `command` is invoked exactly as its own CLI entry point would be (missing
     options fall back to that command's own defaults via `ctx.invoke`), so
@@ -2525,12 +2485,6 @@ def _sync_network_step(
     help="Restrict sync to just the context bundle or just the indices (default: both).",
 )
 @click.option(
-    "--tag",
-    default="latest",
-    show_default=True,
-    help="GitHub release tag to fetch from.",
-)
-@click.option(
     "--directory",
     type=click.Path(exists=True, file_okay=False, path_type=str),
     default=".",
@@ -2544,17 +2498,17 @@ def _sync_network_step(
     help="Show each step's own output instead of a one-line summary.",
 )
 @click.pass_context
-def sync(
-    ctx: click.Context, only: str | None, tag: str, directory: str, verbose: bool
-) -> None:
+def sync(ctx: click.Context, only: str | None, directory: str, verbose: bool) -> None:
     """Bring the context bundle and the default corpora up to date in one step.
 
-    Composite of `context fetch` -> `corpus fetch --collection
-    literature,docs` -> `index build` for both -> `context apply` (or `init`
-    on a first run, when no `.boepie/` exists yet under --directory). Adds
-    nothing of its own beyond calling those steps: `corpus fetch` already
-    skips a document already converted, and `apply`/`init` already rebuild
-    the bundle's own BM25 index.
+    Composite of `corpus fetch --collection literature,docs` -> `index build`
+    for both -> `context apply` (or `init` on a first run, when no `.boepie/`
+    exists yet under --directory). Adds nothing of its own beyond calling
+    those steps: `corpus fetch` already skips a document already converted,
+    and `apply`/`init` already rebuild the bundle's own BM25 index.
+
+    The bundle's content is not fetched at all: it ships in the venv boepie
+    is installed in, so `apply`/`init` copy it straight from there.
 
     **Every index is built here, never downloaded.** boepie publishes no
     prebuilt index, so the first `sync` on a machine fetches each paper from
@@ -2562,18 +2516,15 @@ def sync(
     seconds. Both fetches are resumable, so a later `sync` only picks up
     what is new.
 
-    The network steps warn and continue on failure instead of aborting, so
-    the final offline convergence step still runs against whatever is already
-    cached, packaged or previously fetched - the overall exit code stays 0 as
-    long as that local step succeeds. By default only a one-line summary is
+    The corpus fetch warns and continues on failure instead of aborting, so
+    the final convergence step still runs against whatever was previously
+    fetched - the overall exit code stays 0 as long as that local step
+    succeeds. By default only a one-line summary is
     printed; pass --verbose to see each step's own message.
     """
     sync_context = only != "indices"
     sync_indices = only != "context"
     quiet = not verbose
-
-    if sync_context:
-        _sync_network_step(ctx, fetch, f"context fetch --tag {tag}", quiet, tag=tag)
 
     if sync_indices:
         _sync_network_step(
@@ -2599,7 +2550,7 @@ def sync(
                 ctx.invoke(init, directory=directory, skills=False, hooks=False)
 
     if quiet:
-        display.success(f"(tag={tag}).", lead="Synced")
+        display.success("context bundle and corpora.", lead="Synced")
 
 
 # ---------------------------------------------------------------------------
@@ -2724,12 +2675,6 @@ def _report_mcp_target(result: TargetResult) -> None:
     is_flag=True,
     help="Replace an existing boepie entry in an agent's config.",
 )
-@click.option(
-    "--tag",
-    default="latest",
-    show_default=True,
-    help="GitHub release tag to fetch the bundle content from.",
-)
 @click.pass_context
 def setup(
     ctx: click.Context,
@@ -2737,7 +2682,6 @@ def setup(
     agents: tuple[str, ...],
     no_corpus: bool,
     force: bool,
-    tag: str,
 ) -> None:
     """Set up a workspace: context bundle, corpora, indices, MCP launch files.
 
@@ -2747,8 +2691,9 @@ def setup(
 
     \b
     context   The `.boepie/` bundle in --directory: created if absent,
-              otherwise converged. Only `managed_by: boepie` files are
-              rewritten; anything you wrote is left byte-for-byte.
+              otherwise converged, from the content in this venv - nothing
+              is downloaded. Only `managed_by: boepie` files are rewritten;
+              anything you wrote is left byte-for-byte.
     corpus    The machine-global literature and docs corpora, reconciled
               against boepie's packaged manifests. A `managed_by: user`
               document is never touched, and a document already converted is
@@ -2766,7 +2711,6 @@ def setup(
     target_dir = Path(directory).resolve()
 
     display.heading("context")
-    _sync_network_step(ctx, fetch, f"context fetch --tag {tag}", False, tag=tag)
     if (target_dir / ".boepie").exists():
         ctx.invoke(apply, directory=directory)
     else:
@@ -2919,6 +2863,19 @@ async def _hint_search(prompt: str, collections: tuple[str, ...]) -> None:
 
 
 def _check_known_key(key: str) -> None:
+    """Refuse a key `config get`/`set` cannot honour, saying which kind it is.
+
+    A key in a deferred section is declared in the schema but read by
+    nothing, so setting it would change no behaviour at all. That is a
+    different problem from a typo and gets a different sentence: "not
+    implemented" is actionable, "unknown key" would send someone looking for
+    a spelling mistake that is not there.
+    """
+    if settings.deferred_key(key):
+        raise CliError(
+            f"'{key}' is declared for future development and is not implemented "
+            f"yet - nothing reads it, so setting it would have no effect."
+        )
     if key not in settings.known_keys():
         raise CliError(
             f"unknown config key '{key}'. Known keys: {', '.join(sorted(settings.known_keys()))}"

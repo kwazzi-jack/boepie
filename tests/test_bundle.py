@@ -5,22 +5,22 @@ surviving `apply_bundle` byte-for-byte, `managed_by: boepie` files actually
 getting rewritten or deleted when orphaned, `--force`-style reverts of a
 named `managed_by: user` file via `force_paths`, a full `reset_bundle` teardown
 and rebuild, the AGENTS.md pointer being idempotent, the frontmatter helpers
-round-tripping, and the content channel (`resolve_content_source`,
-`fetch_content`) that backs convergence.
+round-tripping, and the single content source (the installed package's own
+`context/content/`, via `boepie.assets.context_content_dir`) that backs
+convergence.
 """
 
 from __future__ import annotations
 
-import io
 import json
 import shutil
-import tarfile
 from importlib.metadata import PackageNotFoundError, version as installed_version
 from pathlib import Path
 
 import pytest
 
 from boepie import __version__ as boepie_version
+from boepie.assets import asset_checksum, context_content_dir
 from boepie.context import bundle
 from boepie.context.frontmatter import read_frontmatter, write_frontmatter
 
@@ -30,39 +30,6 @@ def _installed_cultcargo_version() -> str:
         return installed_version("cult-cargo")
     except PackageNotFoundError:
         return "unknown"
-
-
-@pytest.fixture(autouse=True)
-def _isolated_content_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every test gets an empty content cache by default, so
-    `resolve_content_source()` falls back to the packaged seeds unless a test
-    explicitly populates a cache. Keeps tests independent of whatever a
-    developer's machine happens to have cached at BOEPIE_CONTENT_DIR."""
-    monkeypatch.setattr(bundle, "CONTENT_DIR", tmp_path / "content-cache-unset")
-
-
-def _write_content_manifest(content_dir: Path, content_version: str) -> None:
-    content_dir.mkdir(parents=True, exist_ok=True)
-    manifest_data = {"content_version": content_version, "generated_at": "2026-01-01T00:00:00Z"}
-    (content_dir / "content-manifest.json").write_text(
-        json.dumps(manifest_data, indent=2), encoding="utf-8"
-    )
-
-
-def _build_content_tarball(content_version: str) -> bytes:
-    """A tarball shaped like scripts/package_content.py's output: the seed
-    files unwrapped at the tar root, plus a content-manifest.json."""
-    buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w:gz") as tar:
-        for entry in sorted(bundle._seed_content_dir().iterdir()):
-            tar.add(entry, arcname=entry.name)
-        manifest_bytes = json.dumps(
-            {"content_version": content_version, "generated_at": "2026-01-01T00:00:00Z"}
-        ).encode("utf-8")
-        manifest_info = tarfile.TarInfo(name="content-manifest.json")
-        manifest_info.size = len(manifest_bytes)
-        tar.addfile(manifest_info, io.BytesIO(manifest_bytes))
-    return buffer.getvalue()
 
 
 # ---------------------------------------------------------------------------
@@ -111,7 +78,7 @@ def test_init_bundle_creates_seed_layout_and_manifest(tmp_path: Path) -> None:
 
     assert manifest.boepie_version == boepie_version
     assert manifest.cultcargo_version == _installed_cultcargo_version()
-    assert manifest.content_version == bundle._BUNDLE_VERSION
+    assert manifest.content_sha256 == asset_checksum(context_content_dir())
 
     manifest_on_disk = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest_on_disk == manifest.to_dict()
@@ -125,19 +92,6 @@ def test_init_bundle_raises_if_already_present(tmp_path: Path) -> None:
     bundle.init_bundle(tmp_path)
     with pytest.raises(FileExistsError):
         bundle.init_bundle(tmp_path)
-
-
-def test_init_bundle_copies_from_a_populated_cache_when_present(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    cache_dir = tmp_path / "content-cache"
-    shutil.copytree(bundle._seed_content_dir(), cache_dir)
-    _write_content_manifest(cache_dir, "2.5.0")
-    monkeypatch.setattr(bundle, "CONTENT_DIR", cache_dir)
-
-    manifest = bundle.init_bundle(tmp_path)
-
-    assert manifest.content_version == "2.5.0"
 
 
 def test_seed_skeleton_files_have_okf_frontmatter(tmp_path: Path) -> None:
@@ -184,26 +138,107 @@ def test_status_is_stale_when_manifest_records_a_different_cultcargo_version(
     assert "cultcargo_version" in status.detail
 
 
-def test_status_flags_bundle_behind_cache(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    bundle.init_bundle(tmp_path)  # resolves to seeds: content_version == _BUNDLE_VERSION
+def test_status_flags_a_bundle_behind_the_installed_content(tmp_path: Path) -> None:
+    """The content ships in the wheel, so the only number that could track it
+    by hand is boepie's own version - which does not move in an editable
+    checkout, where the seed files are edited directly. A digest of the tree
+    does move, which is what makes "run apply" reachable there."""
+    bundle.init_bundle(tmp_path)
 
-    cache_dir = tmp_path / "content-cache"
-    shutil.copytree(bundle._seed_content_dir(), cache_dir)
-    _write_content_manifest(cache_dir, "9.9.9")
-    monkeypatch.setattr(bundle, "CONTENT_DIR", cache_dir)
+    manifest_path = tmp_path / ".boepie" / "manifest.json"
+    manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest_data["content_sha256"] = "0" * 64
+    manifest_path.write_text(json.dumps(manifest_data, indent=2), encoding="utf-8")
 
     status = bundle.bundle_status(tmp_path)
     assert status.state == "stale"
-    assert "bundle behind cache" in status.detail
+    assert "content_sha256" in status.detail
     assert "boepie context apply" in status.detail
-    assert status.resolved_content_version == "9.9.9"
+    assert status.installed_content_sha256 == asset_checksum(context_content_dir())
 
 
 def test_status_raises_when_bundle_missing(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         bundle.bundle_status(tmp_path)
+
+
+def test_status_on_a_bundle_from_an_older_boepie_names_the_fix(tmp_path: Path) -> None:
+    """`0.3.0` recorded `content_version` where `0.4.0` records
+    `content_sha256`, so the dataclass rejects the old shape - correctly, since
+    neither field can be derived from the other. What it must not do is
+    surface as a `TypeError` from inside `_read_manifest`, three frames below
+    anything that names `context apply`."""
+    bundle.init_bundle(tmp_path)
+
+    manifest_path = tmp_path / ".boepie" / "manifest.json"
+    manifest_data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest_data["bundle_version"] = "0.3.0"
+    manifest_data["content_version"] = "0.3.0"
+    del manifest_data["content_sha256"]
+    manifest_path.write_text(json.dumps(manifest_data, indent=2), encoding="utf-8")
+
+    with pytest.raises(ValueError) as error:
+        bundle.bundle_status(tmp_path)
+
+    assert "0.3.0" in str(error.value)
+    assert "boepie context apply" in str(error.value)
+
+
+def test_status_on_an_unparseable_manifest_names_the_file_and_the_fix(
+    tmp_path: Path,
+) -> None:
+    """A write interrupted partway leaves invalid JSON, and `json`'s own error
+    names a column and nothing else - not the file, not the bundle, not the
+    command that rewrites it."""
+    bundle.init_bundle(tmp_path)
+    (tmp_path / ".boepie" / "manifest.json").write_text('{ "truncated"', encoding="utf-8")
+
+    with pytest.raises(ValueError) as error:
+        bundle.bundle_status(tmp_path)
+
+    assert "manifest.json" in str(error.value)
+    assert "boepie context apply" in str(error.value)
+
+
+def test_status_on_a_manifest_that_is_not_an_object_names_the_fix(
+    tmp_path: Path,
+) -> None:
+    """Valid JSON, wrong shape: `BundleManifest(**data)` would answer a list
+    with a `TypeError` about argument unpacking."""
+    bundle.init_bundle(tmp_path)
+    (tmp_path / ".boepie" / "manifest.json").write_text("[]", encoding="utf-8")
+
+    with pytest.raises(ValueError) as error:
+        bundle.bundle_status(tmp_path)
+
+    assert "boepie context apply" in str(error.value)
+
+
+def test_apply_rewrites_an_unparseable_manifest(tmp_path: Path) -> None:
+    """The fix those errors name has to work for a damaged file too, not just
+    an outdated one."""
+    bundle.init_bundle(tmp_path)
+    (tmp_path / ".boepie" / "manifest.json").write_text('{ "truncated"', encoding="utf-8")
+
+    bundle.apply_bundle(tmp_path, context_content_dir())
+
+    assert bundle.bundle_status(tmp_path).state == "current"
+
+
+def test_apply_rewrites_a_manifest_from_an_older_boepie(tmp_path: Path) -> None:
+    """The fix that error names has to work: `apply` writes the manifest
+    rather than reading it, so it converges a bundle `status` cannot even
+    open."""
+    bundle.init_bundle(tmp_path)
+
+    manifest_path = tmp_path / ".boepie" / "manifest.json"
+    manifest_path.write_text(
+        json.dumps({"bundle_version": "0.3.0", "content_version": "0.3.0"}), encoding="utf-8"
+    )
+
+    bundle.apply_bundle(tmp_path, context_content_dir())
+
+    assert bundle.bundle_status(tmp_path).state == "current"
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +256,7 @@ def test_apply_preserves_source_local_file_byte_for_byte(tmp_path: Path) -> None
     concept_path.write_bytes(local_document.encode("utf-8"))
     local_bytes_before_apply = concept_path.read_bytes()
 
-    bundle.apply_bundle(tmp_path, bundle.resolve_content_source())
+    bundle.apply_bundle(tmp_path, context_content_dir())
 
     assert concept_path.read_bytes() == local_bytes_before_apply
 
@@ -229,12 +264,12 @@ def test_apply_preserves_source_local_file_byte_for_byte(tmp_path: Path) -> None
 def test_apply_rewrites_boepie_managed_file(tmp_path: Path) -> None:
     bundle.init_bundle(tmp_path)
     cab_path = tmp_path / ".boepie" / "cabs" / "skeleton.md"
-    seed_bytes = (bundle._seed_content_dir() / "cabs" / "skeleton.md").read_bytes()
+    seed_bytes = (context_content_dir() / "cabs" / "skeleton.md").read_bytes()
 
     cab_path.write_text("this local edit should be discarded on apply\n", encoding="utf-8")
     assert cab_path.read_bytes() != seed_bytes
 
-    bundle.apply_bundle(tmp_path, bundle.resolve_content_source())
+    bundle.apply_bundle(tmp_path, context_content_dir())
 
     assert cab_path.read_bytes() == seed_bytes
 
@@ -265,7 +300,7 @@ def test_apply_deletes_orphaned_boepie_managed_file_and_keeps_local_orphan(
     # cabs/skeleton.md: the bundle's existing boepie-managed copy becomes an
     # orphan and should be deleted.
     reduced_source_dir = tmp_path / "reduced-source"
-    shutil.copytree(bundle._seed_content_dir(), reduced_source_dir)
+    shutil.copytree(context_content_dir(), reduced_source_dir)
     (reduced_source_dir / "cabs" / "skeleton.md").unlink()
 
     bundle.apply_bundle(tmp_path, reduced_source_dir)
@@ -285,7 +320,7 @@ def test_apply_prepends_a_new_log_entry_without_losing_the_old_one(tmp_path: Pat
     entries_after_init = [line for line in log_path.read_text(encoding="utf-8").splitlines() if line.startswith("- ")]
     assert len(entries_after_init) == 1
 
-    bundle.apply_bundle(tmp_path, bundle.resolve_content_source())
+    bundle.apply_bundle(tmp_path, context_content_dir())
 
     entries_after_apply = [line for line in log_path.read_text(encoding="utf-8").splitlines() if line.startswith("- ")]
     assert len(entries_after_apply) == 2
@@ -295,7 +330,7 @@ def test_apply_prepends_a_new_log_entry_without_losing_the_old_one(tmp_path: Pat
 
 def test_apply_raises_when_bundle_missing(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
-        bundle.apply_bundle(tmp_path, bundle._seed_content_dir())
+        bundle.apply_bundle(tmp_path, context_content_dir())
 
 
 def test_apply_with_no_force_paths_is_unchanged_from_before(tmp_path: Path) -> None:
@@ -303,10 +338,10 @@ def test_apply_with_no_force_paths_is_unchanged_from_before(tmp_path: Path) -> N
     mentions it must behave exactly as it did before the parameter existed."""
     bundle.init_bundle(tmp_path)
     cab_path = tmp_path / ".boepie" / "cabs" / "skeleton.md"
-    seed_bytes = (bundle._seed_content_dir() / "cabs" / "skeleton.md").read_bytes()
+    seed_bytes = (context_content_dir() / "cabs" / "skeleton.md").read_bytes()
     cab_path.write_text("this local edit should be discarded on apply\n", encoding="utf-8")
 
-    bundle.apply_bundle(tmp_path, bundle.resolve_content_source())
+    bundle.apply_bundle(tmp_path, context_content_dir())
 
     assert cab_path.read_bytes() == seed_bytes
     log_text = (tmp_path / ".boepie" / "apply-log.md").read_text(encoding="utf-8")
@@ -346,12 +381,12 @@ def _write_local_orphan(bundle_dir: Path) -> Path:
 def test_apply_force_reverts_a_source_local_file_to_boepie_managed(tmp_path: Path) -> None:
     bundle.init_bundle(tmp_path)
     concept_path = tmp_path / ".boepie" / "concepts" / "skeleton.md"
-    seed_bytes = (bundle._seed_content_dir() / "concepts" / "skeleton.md").read_bytes()
+    seed_bytes = (context_content_dir() / "concepts" / "skeleton.md").read_bytes()
     _mark_source_local(concept_path)
     assert concept_path.read_bytes() != seed_bytes
 
     bundle.apply_bundle(
-        tmp_path, bundle.resolve_content_source(), force_paths=["concepts/skeleton.md"]
+        tmp_path, context_content_dir(), force_paths=["concepts/skeleton.md"]
     )
 
     assert concept_path.read_bytes() == seed_bytes
@@ -362,11 +397,11 @@ def test_apply_force_reverts_a_source_local_file_to_boepie_managed(tmp_path: Pat
 def test_apply_force_accepts_a_dot_boepie_prefixed_path(tmp_path: Path) -> None:
     bundle.init_bundle(tmp_path)
     concept_path = tmp_path / ".boepie" / "concepts" / "skeleton.md"
-    seed_bytes = (bundle._seed_content_dir() / "concepts" / "skeleton.md").read_bytes()
+    seed_bytes = (context_content_dir() / "concepts" / "skeleton.md").read_bytes()
     _mark_source_local(concept_path)
 
     bundle.apply_bundle(
-        tmp_path, bundle.resolve_content_source(), force_paths=[".boepie/concepts/skeleton.md"]
+        tmp_path, context_content_dir(), force_paths=[".boepie/concepts/skeleton.md"]
     )
 
     assert concept_path.read_bytes() == seed_bytes
@@ -377,7 +412,7 @@ def test_apply_force_on_a_boepie_managed_target_raises(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="not managed_by: user"):
         bundle.apply_bundle(
-            tmp_path, bundle.resolve_content_source(), force_paths=["concepts/skeleton.md"]
+            tmp_path, context_content_dir(), force_paths=["concepts/skeleton.md"]
         )
 
 
@@ -386,7 +421,7 @@ def test_apply_force_on_a_missing_bundle_file_raises(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="no such bundle file to revert"):
         bundle.apply_bundle(
-            tmp_path, bundle.resolve_content_source(), force_paths=["concepts/nonexistent.md"]
+            tmp_path, context_content_dir(), force_paths=["concepts/nonexistent.md"]
         )
 
 
@@ -397,7 +432,7 @@ def test_apply_force_on_a_file_with_no_source_counterpart_raises(tmp_path: Path)
 
     with pytest.raises(ValueError, match="no counterpart in the resolved content source"):
         bundle.apply_bundle(
-            tmp_path, bundle.resolve_content_source(), force_paths=["concepts/my-notes.md"]
+            tmp_path, context_content_dir(), force_paths=["concepts/my-notes.md"]
         )
 
 
@@ -406,7 +441,7 @@ def test_apply_force_path_traversal_raises_before_any_write(tmp_path: Path) -> N
 
     with pytest.raises(ValueError, match="escapes the bundle directory"):
         bundle.apply_bundle(
-            tmp_path, bundle.resolve_content_source(), force_paths=["../../etc/passwd"]
+            tmp_path, context_content_dir(), force_paths=["../../etc/passwd"]
         )
 
 
@@ -416,7 +451,7 @@ def test_apply_force_log_entry_names_forced_reverts_distinctly(tmp_path: Path) -
     _mark_source_local(concept_path)
 
     bundle.apply_bundle(
-        tmp_path, bundle.resolve_content_source(), force_paths=["concepts/skeleton.md"]
+        tmp_path, context_content_dir(), force_paths=["concepts/skeleton.md"]
     )
 
     log_text = (tmp_path / ".boepie" / "apply-log.md").read_text(encoding="utf-8")
@@ -493,118 +528,26 @@ def test_reset_bundle_raises_when_bundle_missing(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# resolve_content_source() / fetch_content()
+# the content source: the installed package, and nothing else
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_content_source_falls_back_to_seeds_when_cache_absent() -> None:
-    assert bundle.resolve_content_source() == bundle._seed_content_dir()
+def test_the_content_source_is_the_installed_package(tmp_path: Path) -> None:
+    """There is one source and no way to point the bundle at another.
 
+    A machine-global cache filled from a GitHub release used to be preferred
+    over it whenever populated, and a cache predating a frontmatter change
+    served field names `apply_bundle` then read as the user's own files -
+    freezing a bundle at an old revision with no error to say so. The cache,
+    the release asset and `BOEPIE_CONTENT_DIR` are all gone.
+    """
+    source_dir = context_content_dir()
+    assert (source_dir / "index.md").is_file()
+    assert source_dir.is_relative_to(Path(bundle.__file__).resolve().parent)
 
-def test_resolve_content_source_prefers_populated_cache_over_seeds(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    cache_dir = tmp_path / "content-cache"
-    _write_content_manifest(cache_dir, "9.9.9")
-    monkeypatch.setattr(bundle, "CONTENT_DIR", cache_dir)
-
-    assert bundle.resolve_content_source() == cache_dir
-
-
-def test_fetch_content_extracts_verified_tarball_into_content_dir(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    cache_dir = tmp_path / "content-cache"
-    monkeypatch.setattr(bundle, "CONTENT_DIR", cache_dir)
-    monkeypatch.setattr(bundle, "fetch_asset_checksum", lambda tag, asset_name: "remote-digest")
-
-    tarball_bytes = _build_content_tarball("2.0.0")
-    captured_args: list[tuple[str, str, str | None]] = []
-
-    def _fake_download(tag: str, asset_name: str, expected_digest: str | None = None) -> bytes:
-        captured_args.append((tag, asset_name, expected_digest))
-        return tarball_bytes
-
-    monkeypatch.setattr(bundle, "download_verified_asset", _fake_download)
-
-    result = bundle.fetch_content(tag="v2")
-
-    assert result.content_dir == cache_dir
-    assert result.changed is True
-    assert captured_args == [("v2", "knowledge-content.tar.gz", "remote-digest")]
-    assert (cache_dir / "index.md").exists()
-    manifest_data = json.loads((cache_dir / "content-manifest.json").read_text(encoding="utf-8"))
-    assert manifest_data["content_version"] == "2.0.0"
-
-
-def test_fetch_content_replaces_a_previous_cache(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    cache_dir = tmp_path / "content-cache"
-    cache_dir.mkdir()
-    (cache_dir / "stale-marker.txt").write_text("old", encoding="utf-8")
-    monkeypatch.setattr(bundle, "CONTENT_DIR", cache_dir)
-    monkeypatch.setattr(bundle, "fetch_asset_checksum", lambda tag, asset_name: "remote-digest")
-
-    tarball_bytes = _build_content_tarball("3.0.0")
-    monkeypatch.setattr(
-        bundle, "download_verified_asset",
-        lambda tag, asset_name, expected_digest=None: tarball_bytes,
-    )
-
-    bundle.fetch_content()
-
-    assert not (cache_dir / "stale-marker.txt").exists()
-    assert (cache_dir / "content-manifest.json").exists()
-
-
-def test_fetch_content_skips_download_when_cached_digest_matches_remote(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A cache already at the remote digest should be reported unchanged
-    without ever calling `download_verified_asset` - the whole point of
-    checking the small `.sha256` sidecar first."""
-    cache_dir = tmp_path / "content-cache"
-    _write_content_manifest(cache_dir, "1.0.0")
-    (cache_dir.parent / f".{cache_dir.name}.sha256").write_text("abc123", encoding="utf-8")
-    monkeypatch.setattr(bundle, "CONTENT_DIR", cache_dir)
-    monkeypatch.setattr(bundle, "fetch_asset_checksum", lambda tag, asset_name: "abc123")
-    monkeypatch.setattr(
-        bundle, "download_verified_asset",
-        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("should not download")),
-    )
-
-    result = bundle.fetch_content(tag="latest")
-
-    assert result.content_dir == cache_dir
-    assert result.changed is False
-    manifest_data = json.loads((cache_dir / "content-manifest.json").read_text(encoding="utf-8"))
-    assert manifest_data["content_version"] == "1.0.0"
-
-
-def test_fetch_content_redownloads_when_cached_digest_differs_from_remote(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A stale cached digest must not short-circuit the download."""
-    cache_dir = tmp_path / "content-cache"
-    _write_content_manifest(cache_dir, "1.0.0")
-    (cache_dir.parent / f".{cache_dir.name}.sha256").write_text("old-digest", encoding="utf-8")
-    monkeypatch.setattr(bundle, "CONTENT_DIR", cache_dir)
-    monkeypatch.setattr(bundle, "fetch_asset_checksum", lambda tag, asset_name: "new-digest")
-
-    tarball_bytes = _build_content_tarball("2.0.0")
-    monkeypatch.setattr(
-        bundle, "download_verified_asset",
-        lambda tag, asset_name, expected_digest=None: tarball_bytes,
-    )
-
-    result = bundle.fetch_content(tag="latest")
-
-    assert result.changed is True
-    manifest_data = json.loads((cache_dir / "content-manifest.json").read_text(encoding="utf-8"))
-    assert manifest_data["content_version"] == "2.0.0"
-    digest_path = cache_dir.parent / f".{cache_dir.name}.sha256"
-    assert digest_path.read_text(encoding="utf-8") == "new-digest"
+    bundle.init_bundle(tmp_path)
+    seed_bytes = (source_dir / "concepts" / "skeleton.md").read_bytes()
+    assert (tmp_path / ".boepie" / "concepts" / "skeleton.md").read_bytes() == seed_bytes
 
 
 # ---------------------------------------------------------------------------
@@ -695,7 +638,7 @@ def test_apply_ignores_derived_index_and_gitignore(tmp_path: Path) -> None:
     binary_index_file.parent.mkdir(parents=True)
     binary_index_file.write_bytes(b"\x93NUMPY\x01\x00\xff\xfe")
 
-    bundle.apply_bundle(tmp_path, bundle.resolve_content_source())
+    bundle.apply_bundle(tmp_path, context_content_dir())
 
     assert binary_index_file.exists()
     assert (bundle_dir / ".gitignore").exists()
@@ -729,59 +672,3 @@ def test_append_agents_pointer_is_idempotent(tmp_path: Path) -> None:
     text = agents_md.read_text(encoding="utf-8")
     assert text.count("Stimela knowledge base in `.boepie/`") == 1
     assert "Some existing instructions." in text
-
-
-# ---------------------------------------------------------------------------
-# Content cache: a pre-schema-change cache must not win over the seeds
-# ---------------------------------------------------------------------------
-
-
-def _write_cache(cache_dir: Path, content_version: str) -> None:
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    (cache_dir / "content-manifest.json").write_text(
-        json.dumps({"content_version": content_version, "files": []}), encoding="utf-8"
-    )
-
-
-def test_a_cache_at_the_current_content_version_is_used(tmp_path, monkeypatch):
-    cache_dir = tmp_path / "content"
-    _write_cache(cache_dir, bundle._BUNDLE_VERSION)
-    monkeypatch.setattr(bundle, "CONTENT_DIR", cache_dir)
-
-    assert bundle.resolve_content_source() == cache_dir
-
-
-def test_a_cache_predating_a_schema_change_falls_back_to_the_packaged_seeds(
-    tmp_path, monkeypatch
-):
-    """A cache built before a required-frontmatter-field change carries the
-    old field names, which `apply_bundle` would read as the user's own files
-    and then refuse to regenerate - a bundle silently frozen at an old
-    revision. Falling back to the seeds is the safe answer."""
-    cache_dir = tmp_path / "content"
-    _write_cache(cache_dir, "0.1.0")
-    monkeypatch.setattr(bundle, "CONTENT_DIR", cache_dir)
-
-    resolved = bundle.resolve_content_source()
-
-    assert resolved != cache_dir
-    assert (resolved / "index.md").is_file()
-
-
-def test_a_cache_newer_than_this_boepie_is_still_used(tmp_path, monkeypatch):
-    """Only older caches are rejected: a newer one means the user fetched
-    content from a release ahead of their installed boepie, which is their
-    call to make."""
-    cache_dir = tmp_path / "content"
-    _write_cache(cache_dir, "99.0.0")
-    monkeypatch.setattr(bundle, "CONTENT_DIR", cache_dir)
-
-    assert bundle.resolve_content_source() == cache_dir
-
-
-def test_an_unparseable_content_version_is_treated_as_old(tmp_path, monkeypatch):
-    cache_dir = tmp_path / "content"
-    _write_cache(cache_dir, "not-a-version")
-    monkeypatch.setattr(bundle, "CONTENT_DIR", cache_dir)
-
-    assert bundle.resolve_content_source() != cache_dir

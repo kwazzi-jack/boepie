@@ -17,7 +17,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-_DEFAULT_MANIFEST_PATH = Path(__file__).resolve().parent / "default_manifest.json"
+from boepie.assets import docs_manifest_path
 
 # A project name becomes a directory (`docs_dir/{project}/`), so it must be a
 # safe path component: lowercase alnum plus `-`/`_`, no leading punctuation
@@ -61,7 +61,7 @@ def _read_projects(path: Path) -> list[DocsProject]:
 
 def load_default_manifest() -> list[DocsProject]:
     """The tracked, packaged set of doc sites boepie converts by default."""
-    return _read_projects(_DEFAULT_MANIFEST_PATH)
+    return _read_projects(docs_manifest_path())
 
 
 def load_manifest(docs_dir: Path) -> list[DocsProject]:

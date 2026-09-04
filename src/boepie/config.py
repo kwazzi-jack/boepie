@@ -46,10 +46,10 @@ _SETTINGS = settings.load()
 # --collection literature` (arXiv HTML, converted locally) and `boepie corpus
 # add literature <arxiv_id>`, and optionally supplemented with
 # `scripts/corpus_to_md.py` (BYO-PDF, also local, and not yet migrated to
-# this layout - see scripts/migrate_corpus_layout.py). Unlike DOCS_DIR this is
-# machine-global user data, not a repo-relative dev path: no literature
-# Markdown is shipped or redistributed by boepie, so every machine builds its
-# own copy of whichever papers its manifest names.
+# this layout - see scripts/migrate_corpus_layout.py). Machine-global user
+# data, like DOCS_DIR and NOTES_DIR: no literature Markdown is shipped or
+# redistributed by boepie, so every machine builds its own copy of whichever
+# papers its manifest names.
 LITERATURE_DIR: Path = Path(
     os.environ.get("BOEPIE_LITERATURE_DIR", str(Path(user_data_dir("boepie")) / "literature"))
 )
@@ -89,13 +89,13 @@ NOTES_DIR: Path = Path(
 # so an installed (not cloned) boepie has somewhere sensible to keep a
 # fetched index across runs without redownloading it.
 #
-# The `index` component is load-bearing: LITERATURE_DIR, NOTES_DIR and
-# CONTENT_DIR all sit directly under the same user data directory, so an
+# The `index` component is load-bearing: LITERATURE_DIR, DOCS_DIR and
+# NOTES_DIR all sit directly under the same user data directory, so an
 # INDEX_DIR pointing at that root makes every corpus a sibling of the real
 # index collections - and `index status`/`index list`, which enumerate
-# INDEX_DIR's subdirectories, then report `notes/` and `content/` as
-# collections and the document directories inside them as available index
-# ids. Anything that enumerates collections needs this to name only indices.
+# INDEX_DIR's subdirectories, then report `notes/` as a collection and the
+# document directories inside it as available index ids. Anything that
+# enumerates collections needs this to name only indices.
 INDEX_DIR: Path = Path(
     os.environ.get("BOEPIE_INDEX_DIR", str(Path(user_data_dir("boepie")) / "index"))
 )
@@ -116,13 +116,12 @@ def bundle_dir_override() -> Path | None:
     return Path(raw_path).expanduser() if raw_path else None
 
 
-# Machine-global cache for curated context-bundle content fetched via
-# `boepie context fetch` (the knowledge-content.tar.gz release asset
-# extracts here). Distinct from INDEX_DIR: this holds source markdown that
-# `context init`/`apply` copy from, not a built search index.
-CONTENT_DIR: Path = Path(
-    os.environ.get("BOEPIE_CONTENT_DIR", str(Path(user_data_dir("boepie")) / "content"))
-)
+# There is deliberately no CONTENT_DIR any more. The curated context-bundle
+# content ships in the wheel and `context init`/`apply` copy straight from
+# there (`boepie.assets.context_content_dir`); the machine-global cache that
+# `boepie context fetch` used to fill from a GitHub release is gone, along
+# with the command, because a cache that can disagree with the installed
+# boepie is a second source of truth with no way to see which one won.
 
 # Where the fastembed backend caches its downloaded ONNX model files.
 # fastembed's own default is a tempdir (cleared on reboot on most systems,
@@ -306,21 +305,25 @@ STIMELA_CONFIG_CACHE_DIR: Path = Path(
 )
 
 # ---------------------------------------------------------------------------
-# Sync: staleness checks (soft nudges only - never OS-level scheduling, never
-# a self-update)
+# Sync: staleness checks - NOT IMPLEMENTED, reserved for future development
 # ---------------------------------------------------------------------------
 
-# Whether a stale `sync` (see SYNC_CHECK_INTERVAL_DAYS) runs automatically
-# (quietly, on `boepie serve` startup or a CLI invocation) versus only
-# printing a one-line nudge for the user to run it themselves.
-SYNC_AUTO_SYNC: bool = _SETTINGS.sync.auto_sync
-
-# How many days since the last `sync` before it's considered stale.
-SYNC_CHECK_INTERVAL_DAYS: int = _SETTINGS.sync.check_interval_days
-
-# Whether to check the installed boepie version against the latest GitHub
-# release and print an upgrade nudge - prompt-only, boepie never self-updates.
-SYNC_CHECK_BOEPIE_VERSION: bool = _SETTINGS.sync.check_boepie_version
+# Nothing reads these, and nothing did: there is no staleness check, no
+# nudge, and no version lookup. `settings.SyncSettings` is listed in
+# `_DEFERRED_SECTIONS`, so the keys behind them appear in no `config`
+# surface and cannot be set - a switch boepie ignores reads as broken rather
+# than as absent. The constants are not exported here either, for the same
+# reason: an importable `SYNC_AUTO_SYNC` invites a caller to branch on a
+# value the user has no way to change.
+#
+# Intended shape, if the feature is built: a soft nudge only - never
+# OS-level scheduling, never a self-update. `sync.auto_sync` would run a
+# stale sync quietly instead of printing the nudge,
+# `sync.check_interval_days` would say how old counts as stale, and
+# `sync.check_boepie_version` would compare the installed version against
+# the latest GitHub release. Note that last one predates the 2026-09-04
+# decision that boepie fetches nothing from a release; a version *lookup* is
+# not an asset download, but it is worth re-deciding rather than assuming.
 
 # ---------------------------------------------------------------------------
 # Custom instructions

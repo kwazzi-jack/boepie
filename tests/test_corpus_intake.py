@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from boepie.corpus import intake
 from boepie.corpus.intake import (
     IntakeError,
     _mineru_environment,
@@ -386,3 +387,62 @@ def test_a_single_file_conversion_still_goes_through_the_batch_call(
     assert converted.via == "mineru"
     assert converted.format == "pdf"
     assert converted.markdown.startswith("# 0000-paper")
+
+
+# ---------------------------------------------------------------------------
+# a MinerU run is bounded
+# ---------------------------------------------------------------------------
+
+
+def test_a_mineru_run_is_given_a_deadline_that_scales_with_the_batch(
+    tmp_path, monkeypatch
+):
+    """MinerU's cost has two terms - the model stack loads once per run, then
+    each document is converted - so one flat number would be either too tight
+    for a large batch or useless for a small one."""
+    recorded: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):
+        recorded.update(kwargs)
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("boepie.corpus.intake.mineru_available", lambda: True)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    paths = []
+    for index in range(3):
+        path = tmp_path / f"{index}.pdf"
+        path.write_bytes(b"%PDF")
+        paths.append(path)
+    _batch(paths)
+
+    assert recorded["stdin"] is subprocess.DEVNULL
+    assert recorded["timeout"] == (
+        intake._MINERU_STARTUP_GRACE_SECONDS + 3 * intake._MINERU_SECONDS_PER_DOCUMENT
+    )
+
+
+def test_a_mineru_run_that_never_finishes_is_cancelled_and_says_so(
+    tmp_path, monkeypatch
+):
+    """There was no timeout here at all, so one wedged conversion hung the
+    whole `corpus add` with no output and nothing to interrupt but Ctrl-C.
+    The message has to name a smaller batch, which is the lever the user
+    actually has."""
+
+    def hang(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    monkeypatch.setattr("boepie.corpus.intake.mineru_available", lambda: True)
+    monkeypatch.setattr(subprocess, "run", hang)
+
+    path = tmp_path / "wedged.pdf"
+    path.write_bytes(b"%PDF")
+
+    with pytest.raises(IntakeError) as error:
+        _batch([path])
+
+    message = str(error.value)
+    assert "cancelled" in message
+    assert "Nothing was written" in message
+    assert "mineru.batch_size" in message

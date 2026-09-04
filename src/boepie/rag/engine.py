@@ -21,8 +21,10 @@ Two lifecycles:
   reachable; with ``embedding=None`` it needs nothing but the corpus. Produces
   a self-contained ``index_root/<collection>/<index_id>/`` directory
   (``chunks.jsonl`` + ``bm25/`` + ``manifest.json``, plus ``embeddings.npy``
-  when embedded) that can be tarred up and shipped as a release asset. No LLM,
-  so it's cheap enough to run offline on a laptop.
+  when embedded). Self-contained so it can be copied between machines, not so
+  it can be published: boepie ships no prebuilt index, and every index is
+  built where it is queried. No LLM, so it's cheap enough to run offline on a
+  laptop.
 * ``load_for_query()`` / ``query()`` (or the ``search()`` convenience wrapper) -
   the end-user path. For an embedded index, loads the matrix and embeds each
   question with the same backend the index was built with (enforced via the

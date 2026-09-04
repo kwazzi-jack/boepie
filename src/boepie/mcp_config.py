@@ -312,6 +312,16 @@ def register_via_cli(
     it - `claude mcp add --scope project` writes `./.mcp.json` - so without
     this, `boepie setup --directory elsewhere` would quietly configure
     whichever directory the user happened to be standing in.
+
+    **Closed stdin and a timeout, both.** `capture_output` redirects stdout
+    and stderr but leaves stdin inherited, so a CLI that decides to prompt -
+    for a confirmation, for a login - reads from the terminal the user is
+    watching `setup` in, silently competing with it for keystrokes. There is
+    no answer boepie could give such a prompt anyway: this is a
+    non-interactive registration. `DEVNULL` makes the prompt fail fast, and
+    the timeout is the backstop for a CLI that blocks on something else
+    entirely. Either way the failure is reported and the run continues to
+    the next agent, with the paste-in definition printed at the end.
     """
     if target.register is None:
         raise ValueError(f"{target.name} has no CLI registration")
@@ -331,8 +341,17 @@ def register_via_cli(
             capture_output=True,
             text=True,
             timeout=_CLI_TIMEOUT_SECONDS,
+            stdin=subprocess.DEVNULL,
         )
-    except (OSError, subprocess.TimeoutExpired) as error:
+    except subprocess.TimeoutExpired:
+        return TargetResult(
+            target.name,
+            "failed",
+            None,
+            f"'{argv[0]}' did not finish within {_CLI_TIMEOUT_SECONDS}s and was "
+            "cancelled; register it by hand with the definition below",
+        )
+    except OSError as error:
         return TargetResult(target.name, "failed", None, str(error))
     if completed.returncode != 0:
         reason = (completed.stderr or completed.stdout or "").strip().splitlines()
@@ -378,6 +397,7 @@ def _already_registered(target: AgentTarget, directory: Path) -> bool:
             capture_output=True,
             text=True,
             timeout=_CLI_TIMEOUT_SECONDS,
+            stdin=subprocess.DEVNULL,
         )
     except (OSError, subprocess.TimeoutExpired):
         return False

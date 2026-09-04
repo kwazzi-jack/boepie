@@ -148,12 +148,14 @@ def test_index_group_help(runner: CliRunner) -> None:
     assert "fetch" not in result.output
 
 
-def test_context_group_has_fetch(runner: CliRunner) -> None:
-    """The context group should have a fetch command."""
+def test_context_group_has_no_fetch(runner: CliRunner) -> None:
+    """There is no `context fetch` either, for the same reason as `index
+    fetch`: the bundle's content ships in the venv boepie is installed in,
+    so `init`/`apply` copy it from there and nothing is downloaded."""
     result = runner.invoke(cli.cli, ["context", "--help"])
 
     assert result.exit_code == 0
-    assert "fetch" in result.output
+    assert "fetch" not in result.output
 
 
 def test_context_group_has_apply_not_update(runner: CliRunner) -> None:

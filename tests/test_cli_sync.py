@@ -1,17 +1,17 @@
-"""Tests for `boepie sync` (composite of `context fetch` -> `corpus fetch
---collection literature,docs` -> `index build` for both -> `context
-apply`/`init`).
+"""Tests for `boepie sync` (composite of `corpus fetch --collection
+literature,docs` -> `index build` for both -> `context apply`/`init`).
 
 `sync` adds no fetch logic of its own: it calls the same underlying seams
-the `context fetch` and `corpus fetch` commands call
-(`boepie.cli.fetch_content`, `boepie.cli.sync_literature`,
+the `corpus fetch` command calls (`boepie.cli.sync_literature`,
 `boepie.cli.sync_docs`), so those are what gets monkeypatched here. The final
 convergence step (`apply`/`init`) runs for real against a tmp INDEX_DIR,
 mirroring tests/test_cli_context.py.
 
-Nothing here downloads an index. boepie publishes no prebuilt index any
-more, so `sync`'s middle leg fetches corpora and then builds over them - and
-with the corpora stubbed empty, each build is skipped rather than run.
+Nothing here downloads anything. boepie publishes no prebuilt index, so
+`sync`'s middle leg fetches corpora and then builds over them - and with the
+corpora stubbed empty, each build is skipped rather than run. The bundle's
+own content is not fetched at all: it ships in the venv, which is why there
+is no context leg in the order below and no --tag on the command.
 """
 
 from __future__ import annotations
@@ -24,7 +24,6 @@ import pytest
 from click.testing import CliRunner
 
 from boepie import cli
-from boepie.context import ContentFetchResult
 
 
 @pytest.fixture
@@ -55,10 +54,6 @@ def _isolate_corpora(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "sync_docs", MagicMock(return_value=[]))
 
 
-def _failing_fetch_content(tag: str = "latest") -> Path:
-    raise ValueError("simulated content-fetch failure")
-
-
 def _failing_sync_literature(collection_dir, manifest, **kwargs) -> list:
     # `_sync_network_step` only treats (SystemExit, httpx.HTTPError) as a
     # warn-and-continue network failure - the same shape a real network
@@ -68,19 +63,17 @@ def _failing_sync_literature(collection_dir, manifest, **kwargs) -> list:
 
 
 # ---------------------------------------------------------------------------
-# step order: context fetch -> corpus fetch -> index build -> apply/init
+# step order: corpus fetch -> index build -> apply/init
 # ---------------------------------------------------------------------------
 
 
-def test_sync_runs_steps_in_order_and_still_initializes_on_full_network_failure(
+def test_sync_runs_steps_in_order_and_still_initializes_on_network_failure(
     runner: CliRunner, tmp_path: Path, tmp_index_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """With every network leg failing, sync still converges the bundle by
-    calling `init` (no prior `.boepie/`), and the warnings appear in the
-    documented order: context fetch, then the corpus fetch, then the final
-    init. Uses --verbose since the per-step "Initialized" message is
-    otherwise suppressed by the default one-line summary."""
-    monkeypatch.setattr(cli, "fetch_content", _failing_fetch_content)
+    """With the one network leg failing, sync still converges the bundle by
+    calling `init` (no prior `.boepie/`), and the warning precedes it. Uses
+    --verbose since the per-step "Initialized" message is otherwise
+    suppressed by the default one-line summary."""
     monkeypatch.setattr(cli, "sync_literature", _failing_sync_literature)
     monkeypatch.setattr(cli, "INDEX_DIR", tmp_index_dir)
 
@@ -89,11 +82,10 @@ def test_sync_runs_steps_in_order_and_still_initializes_on_full_network_failure(
     assert result.exit_code == 0, result.output
     output = result.output
 
-    context_fetch_pos = output.index("context fetch --tag latest failed")
     corpus_fetch_pos = output.index("corpus fetch --collection literature,docs failed")
     initialized_pos = output.index("Initialized")
 
-    assert context_fetch_pos < corpus_fetch_pos < initialized_pos
+    assert corpus_fetch_pos < initialized_pos
     assert (tmp_path / ".boepie" / "manifest.json").exists()
 
 
@@ -106,20 +98,15 @@ def test_sync_only_context_never_touches_a_corpus(
     runner: CliRunner, tmp_path: Path, tmp_index_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """--only context should skip the corpus half entirely."""
-    fake_fetch_content = MagicMock(
-        return_value=ContentFetchResult(content_dir=tmp_path / "content-cache", changed=True)
-    )
     fake_sync_literature = MagicMock(
         side_effect=AssertionError("sync_literature should not be called")
     )
-    monkeypatch.setattr(cli, "fetch_content", fake_fetch_content)
     monkeypatch.setattr(cli, "sync_literature", fake_sync_literature)
     monkeypatch.setattr(cli, "INDEX_DIR", tmp_index_dir)
 
     result = runner.invoke(cli.cli, ["sync", "--only", "context", "--directory", str(tmp_path)])
 
     assert result.exit_code == 0, result.output
-    fake_fetch_content.assert_called_once()
     fake_sync_literature.assert_not_called()
     assert (tmp_path / ".boepie" / "manifest.json").exists()
 
@@ -127,16 +114,13 @@ def test_sync_only_context_never_touches_a_corpus(
 def test_sync_only_indices_never_touches_the_bundle(
     runner: CliRunner, tmp_path: Path, tmp_index_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """--only indices should skip both `context fetch` and `apply`/`init`."""
-    fake_fetch_content = MagicMock(side_effect=AssertionError("fetch_content should not be called"))
-    monkeypatch.setattr(cli, "fetch_content", fake_fetch_content)
+    """--only indices should skip `apply`/`init`."""
     monkeypatch.setattr(cli, "sync_literature", _failing_sync_literature)
     monkeypatch.setattr(cli, "INDEX_DIR", tmp_index_dir)
 
     result = runner.invoke(cli.cli, ["sync", "--only", "indices", "--directory", str(tmp_path)])
 
     assert result.exit_code == 0, result.output
-    fake_fetch_content.assert_not_called()
     assert "corpus fetch --collection literature,docs failed" in result.output
     assert not (tmp_path / ".boepie").exists()
 
@@ -156,8 +140,6 @@ def test_sync_calls_apply_not_init_when_bundle_already_exists(
     init_result = runner.invoke(cli.cli, ["context", "init", "--directory", str(tmp_path)])
     assert init_result.exit_code == 0, init_result.output
 
-    monkeypatch.setattr(cli, "fetch_content", _failing_fetch_content)
-
     result = runner.invoke(cli.cli, ["sync", "--verbose", "--directory", str(tmp_path)])
 
     assert result.exit_code == 0, result.output
@@ -165,25 +147,28 @@ def test_sync_calls_apply_not_init_when_bundle_already_exists(
     assert "Initialized" not in result.output
 
 
-def test_sync_failing_content_fetch_still_completes_apply_from_seeds(
+def test_sync_converges_the_bundle_with_no_network_at_all(
     runner: CliRunner, tmp_path: Path, tmp_index_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A failing `context fetch` warns but does not block `apply`, which
-    still converges the bundle from whatever content is already resolvable
-    (the packaged seeds, absent a populated cache). Uses --verbose to see
-    the "Applied" message alongside the warning."""
+    """The bundle half of sync reaches nothing outside the venv.
+
+    Its content used to come from a GitHub release asset cached per machine,
+    so a machine that had never fetched one converged from the packaged
+    seeds as a *fallback*. There is no fallback now because there is only
+    one source, and the way to pin that is to make any HTTP client an error:
+    `--only context` must still succeed.
+    """
     monkeypatch.setattr(cli, "INDEX_DIR", tmp_index_dir)
-    init_result = runner.invoke(cli.cli, ["context", "init", "--directory", str(tmp_path)])
-    assert init_result.exit_code == 0, init_result.output
+    monkeypatch.setattr(
+        httpx, "Client", MagicMock(side_effect=AssertionError("sync must not reach the network"))
+    )
 
-    monkeypatch.setattr(cli, "fetch_content", _failing_fetch_content)
-
-    result = runner.invoke(cli.cli, ["sync", "--verbose", "--directory", str(tmp_path)])
+    result = runner.invoke(
+        cli.cli, ["sync", "--only", "context", "--verbose", "--directory", str(tmp_path)]
+    )
 
     assert result.exit_code == 0, result.output
-    assert "Warning" in result.output
-    assert "context fetch --tag latest failed" in result.output
-    assert "Applied" in result.output
+    assert "Initialized" in result.output
     assert (tmp_path / ".boepie" / "manifest.json").exists()
 
 
@@ -196,9 +181,9 @@ def test_sync_default_run_prints_one_line_summary_not_step_detail(
     runner: CliRunner, tmp_path: Path, tmp_index_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Without --verbose, sync's own step messages ("Applied", "Initialized",
-    "Fetched", "Indexed") are suppressed in favour of a single summary line;
-    warnings from a failing step still surface."""
-    monkeypatch.setattr(cli, "fetch_content", _failing_fetch_content)
+    "Indexed") are suppressed in favour of a single summary line; warnings
+    from a failing step still surface."""
+    monkeypatch.setattr(cli, "sync_literature", _failing_sync_literature)
     monkeypatch.setattr(cli, "INDEX_DIR", tmp_index_dir)
 
     result = runner.invoke(cli.cli, ["sync", "--directory", str(tmp_path)])
@@ -206,38 +191,28 @@ def test_sync_default_run_prints_one_line_summary_not_step_detail(
     assert result.exit_code == 0, result.output
     assert "Synced" in result.output
     assert "Initialized" not in result.output
-    assert "Fetched" not in result.output
     assert "Indexed" not in result.output
-    assert "context fetch --tag latest failed" in result.output
+    assert "corpus fetch --collection literature,docs failed" in result.output
 
 
 # ---------------------------------------------------------------------------
-# --tag passthrough
+# no release tag to pass through any more
 # ---------------------------------------------------------------------------
 
 
-def test_sync_tag_reaches_the_one_step_that_still_fetches_a_release_asset(
+def test_sync_has_no_tag_option(
     runner: CliRunner, tmp_path: Path, tmp_index_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`context fetch` is the only release-tagged leg left.
-
-    The corpus legs have no --tag of their own - arXiv and a docs site are
-    not release assets - and there is no index asset any more, so --tag has
-    exactly one consumer.
-    """
-    observed_tags: list[str] = []
-
-    def _recording_fetch_content(tag: str = "latest") -> Path:
-        observed_tags.append(f"context:{tag}")
-        raise ValueError("stop before touching the real cache")
-
-    monkeypatch.setattr(cli, "fetch_content", _recording_fetch_content)
+    """--tag had exactly one consumer, `context fetch`, and that command is
+    gone: the bundle's content ships in the venv, and neither arXiv nor a
+    docs site is a release asset. So the option is a usage error, not an
+    ignored argument."""
     monkeypatch.setattr(cli, "INDEX_DIR", tmp_index_dir)
 
     result = runner.invoke(cli.cli, ["sync", "--tag", "v1.2.3", "--directory", str(tmp_path)])
 
-    assert result.exit_code == 0, result.output
-    assert observed_tags == ["context:v1.2.3"]
+    assert result.exit_code != 0
+    assert "--tag" in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -246,13 +221,12 @@ def test_sync_tag_reaches_the_one_step_that_still_fetches_a_release_asset(
 
 
 def test_sync_help_lists_options(runner: CliRunner) -> None:
-    """`sync` should exist at the top level with --only, --tag, --directory,
+    """`sync` should exist at the top level with --only, --directory,
     --verbose."""
     result = runner.invoke(cli.cli, ["sync", "--help"])
 
     assert result.exit_code == 0
     assert "--only" in result.output
-    assert "--tag" in result.output
     assert "--directory" in result.output
     assert "--verbose" in result.output
 

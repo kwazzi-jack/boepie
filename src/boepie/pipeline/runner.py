@@ -41,6 +41,26 @@ _STIMELA_CMD: list[str] = [str(Path(sys.executable).parent / "stimela")]
 # adds to fill each line out to this width.
 _WIDE_COLUMNS = "2000"
 
+# What `_run` reports when it cancels a child for running past its timeout:
+# the shell convention for a process killed by a signal, 128 + SIGKILL. Any
+# non-zero value would do; this one is the one a reader already knows.
+_TIMEOUT_RETURNCODE = 137
+
+
+def _decoded(captured: str | bytes | None) -> str:
+    """Whatever the child managed to write before it was killed.
+
+    `TimeoutExpired` carries the partial output, and it is the only clue to
+    where the run got stuck - so it is worth keeping even though `text=True`
+    does not apply to it: the attribute is bytes when the process is killed
+    mid-stream.
+    """
+    if captured is None:
+        return ""
+    if isinstance(captured, bytes):
+        return captured.decode("utf-8", errors="replace")
+    return captured
+
 
 @dataclass(frozen=True)
 class RunResult:
@@ -73,15 +93,38 @@ def _run(
     (None for no limit). ``cwd`` is the subprocess working directory (None
     inherits the parent's). ``env`` replaces the child environment entirely
     when given (None inherits the parent's).
+
+    **A timeout is a result, not an exception.** These calls run behind MCP
+    tools, where a `TimeoutExpired` propagating out of the tool is a stack
+    trace the agent cannot act on; the same event as a non-zero `RunResult`
+    reads as "stimela did not finish", which is what happened. The exit code
+    is the shell convention for a killed process (128 + SIGKILL).
+
+    **stdin is closed**, so a child that decides to prompt fails immediately
+    rather than waiting on a terminal that may not be there at all - the MCP
+    server has no one to answer it, and even under the CLI a silent prompt
+    behind captured output is indistinguishable from a hang.
     """
-    proc = subprocess.run(
-        args,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        cwd=cwd,
-        env=env,
-    )
+    try:
+        proc = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.DEVNULL,
+        )
+    except subprocess.TimeoutExpired as expired:
+        return RunResult(
+            command=args,
+            stdout=_decoded(expired.stdout),
+            stderr=(
+                f"Timed out after {timeout}s and was cancelled.\n"
+                + _decoded(expired.stderr)
+            ).strip(),
+            returncode=_TIMEOUT_RETURNCODE,
+        )
     return RunResult(
         command=args,
         stdout=proc.stdout,

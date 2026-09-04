@@ -213,7 +213,7 @@ def test_config_set_writes_and_get_reads_it_back(runner: CliRunner) -> None:
     ("key", "raw_value", "expected"),
     [
         ("literature.prefer_pdf", "true", True),
-        ("sync.check_interval_days", "14", 14),
+        ("retrieval.default_top_k", "14", 14),
         ("literature.fetch_delay", "2.5", 2.5),
         ("mineru.device_mode", "cuda", "cuda"),
     ],
@@ -232,6 +232,24 @@ def test_config_set_rejects_an_unknown_key(runner: CliRunner) -> None:
 
     assert result.exit_code != 0
     assert "unknown config key" in result.output
+
+
+def test_config_refuses_a_key_reserved_for_future_development(
+    runner: CliRunner,
+) -> None:
+    """`sync.*` is declared in the schema and read by nothing, so setting it
+    would change no behaviour. That is a different problem from a typo and
+    needs a different sentence: "unknown key" would send someone hunting a
+    spelling mistake that is not there."""
+    for argv in (
+        ["config", "set", "sync.check_interval_days", "14"],
+        ["config", "get", "sync.check_interval_days"],
+    ):
+        result = runner.invoke(cli.cli, argv)
+
+        assert result.exit_code != 0, result.output
+        assert "future development" in result.output
+        assert "unknown config key" not in result.output
 
 
 def test_config_set_rejects_a_value_the_schema_refuses(runner: CliRunner) -> None:

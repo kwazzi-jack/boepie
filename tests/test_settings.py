@@ -175,7 +175,7 @@ def test_an_invalid_env_value_raises_config_error(monkeypatch: pytest.MonkeyPatc
     ("key", "raw", "expected"),
     [
         ("literature.prefer_pdf", "true", True),
-        ("sync.check_interval_days", "14", 14),
+        ("retrieval.default_top_k", "14", 14),
         ("literature.fetch_delay", "2.5", 2.5),
         ("mineru.device_mode", "cuda", "cuda"),
         ("instructions.custom", "prefer wsclean", "prefer wsclean"),
@@ -199,7 +199,7 @@ def test_parse_value_enforces_field_constraints() -> None:
 
 def test_parse_value_rejects_a_non_numeric_int() -> None:
     with pytest.raises(settings.ConfigError):
-        settings.parse_value("sync.check_interval_days", "soon")
+        settings.parse_value("retrieval.default_top_k", "soon")
 
 
 # ---------------------------------------------------------------------------
@@ -233,10 +233,10 @@ def test_set_value_preserves_other_keys_and_comments(_isolated_config_dir: Path)
 
 
 def test_set_value_overwrites_an_existing_key() -> None:
-    settings.set_value("sync.check_interval_days", 7)
-    settings.set_value("sync.check_interval_days", 14)
+    settings.set_value("retrieval.default_top_k", 7)
+    settings.set_value("retrieval.default_top_k", 14)
 
-    assert settings.get("sync.check_interval_days") == 14
+    assert settings.get("retrieval.default_top_k") == 14
 
 
 def test_set_value_keeps_the_generated_files_comments(_isolated_config_dir: Path) -> None:
@@ -367,7 +367,7 @@ def test_field_for_rejects_an_unknown_key() -> None:
 
 def test_is_list_setting_distinguishes_lists_from_scalars() -> None:
     assert settings.is_list_setting("pipeline.sources")
-    assert not settings.is_list_setting("sync.auto_sync")
+    assert not settings.is_list_setting("corpus.keep_original")
     assert not settings.is_list_setting("embedding.binding")
 
 
@@ -412,3 +412,32 @@ def test_a_generated_config_file_renders_a_list_setting_as_an_array(
 
     raw = settings.config_path().read_text(encoding="utf-8")
     assert 'sources = ["cultcargo::"]' in raw
+
+
+# ---------------------------------------------------------------------------
+# deferred sections: declared for future development, honoured by nothing
+# ---------------------------------------------------------------------------
+
+
+def test_a_deferred_section_is_absent_from_every_config_surface() -> None:
+    """`sync` is declared and read by nothing - no staleness check, no nudge,
+    no version lookup. A setting the user can change and boepie then ignores
+    reads as a broken switch rather than an absent feature, so it appears in
+    no listing and no generated file."""
+    assert settings.is_deferred_section("sync")
+
+    assert not any(key.startswith("sync.") for key in settings.known_keys())
+    assert not any(item.key.startswith("sync.") for item in settings.resolve_settings())
+    assert "[sync]" not in settings.render_default_config()
+
+
+def test_a_deferred_section_is_still_declared_in_the_schema() -> None:
+    """Hidden, not deleted: the shape of the setting is the decision that was
+    made, and re-deriving it later is the expensive part."""
+    assert "sync" in settings.BoepieSettings.model_fields
+    assert settings.BoepieSettings().sync.check_interval_days == 7
+
+
+def test_deferred_key_recognises_a_key_in_a_deferred_section() -> None:
+    assert settings.deferred_key("sync.auto_sync")
+    assert not settings.deferred_key("embedding.binding")

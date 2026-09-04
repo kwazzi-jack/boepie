@@ -321,15 +321,27 @@ class ContextLoader:
     def describe_sources(self) -> dict[str, Any]:
         """Which bundle snapshot this index was built over.
 
-        The bundle's own ``manifest.json`` already versions the content
-        (``content_version``) and the tooling that applied it; copying it here
+        The bundle's own ``manifest.json`` records the content digest
+        (``content_sha256``) and the tooling that applied it; copying it here
         ties a built index to the exact bundle revision it indexed.
+
+        An unreadable manifest is recorded as such rather than raised. This
+        is provenance written *alongside* an index, not the index itself:
+        every chunk is already built by the time it is called, and losing the
+        whole build over a damaged sidecar would be the wrong trade. The
+        commands that actually depend on the manifest -
+        ``bundle_status``/``context apply`` - fail loudly on it instead.
         """
         sources: dict[str, Any] = {"bundle_dir": self.bundle_dir.name}
 
         manifest_path = self.bundle_dir / "manifest.json"
         if manifest_path.is_file():
-            sources["bundle_manifest"] = json.loads(manifest_path.read_text(encoding="utf-8"))
+            try:
+                sources["bundle_manifest"] = json.loads(
+                    manifest_path.read_text(encoding="utf-8")
+                )
+            except (json.JSONDecodeError, OSError) as error:
+                sources["bundle_manifest"] = {"unreadable": str(error)}
         return sources
 
     def iter_documents(self) -> Iterable[Document]:

@@ -386,6 +386,18 @@ class MineruResult:
 # The variable is actively removed rather than merely not set, so an "auto"
 # already exported in the user's shell cannot reach MinerU either.
 _MINERU_AUTO = "auto"
+
+# How long a MinerU run gets before boepie cancels it. Two terms, because the
+# cost has two: the model stack loads once per run (~20s measured, and far
+# worse on a cold cache that has to download it), then each document is
+# converted (~16s for a full pass, ~1.2s for a two-page survey). Both
+# measured on this project's own hardware and multiplied generously - the
+# point is to catch a MinerU that has stopped making progress, not to police
+# a slow machine, so a run has to be very late before this fires. There was
+# no timeout here at all, which meant one wedged conversion hung the whole
+# `corpus add` with no output and nothing to interrupt but Ctrl-C.
+_MINERU_STARTUP_GRACE_SECONDS = 900
+_MINERU_SECONDS_PER_DOCUMENT = 300
 _MINERU_ENV_VARS = {
     "device_mode": "MINERU_DEVICE_MODE",
     "model_source": "MINERU_MODEL_SOURCE",
@@ -504,10 +516,21 @@ def convert_with_mineru(
         command = ["mineru", "-p", str(staged_dir), "-o", str(output_dir), "-b", backend]
         if page_limit is not None:
             command += ["-s", "0", "-e", str(page_limit - 1)]
+        timeout_seconds = _MINERU_STARTUP_GRACE_SECONDS + (
+            _MINERU_SECONDS_PER_DOCUMENT * len(paths)
+        )
         try:
             completed = subprocess.run(
                 command, capture_output=True, text=True, env=environment, check=False,
+                timeout=timeout_seconds, stdin=subprocess.DEVNULL,
             )
+        except subprocess.TimeoutExpired as expired:
+            raise IntakeError(
+                f"mineru did not finish converting {len(paths)} document(s) within "
+                f"{timeout_seconds}s and was cancelled. Nothing was written. Try a "
+                f"smaller `mineru.batch_size`, or convert the documents in smaller "
+                f"batches."
+            ) from expired
         except OSError as error:
             raise IntakeError(f"could not run mineru: {error}") from error
 

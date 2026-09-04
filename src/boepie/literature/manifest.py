@@ -22,7 +22,7 @@ import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-_DEFAULT_MANIFEST_PATH = Path(__file__).resolve().parent / "default_manifest.json"
+from boepie.assets import literature_manifest_path
 
 # Skipped when deriving a citekey's title portion - carry no distinguishing
 # meaning, unlike the corpus's own subject terms.
@@ -59,7 +59,7 @@ def _read_papers(path: Path) -> list[ArxivPaper]:
 
 def load_default_manifest() -> list[ArxivPaper]:
     """The tracked, packaged set of arXiv papers boepie fetches by default."""
-    return _read_papers(_DEFAULT_MANIFEST_PATH)
+    return _read_papers(literature_manifest_path())
 
 def load_manifest(corpus_dir: Path) -> list[ArxivPaper]:
     """Every paper `corpus fetch` reconciles against.
