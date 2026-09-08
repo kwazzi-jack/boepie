@@ -280,13 +280,37 @@ def test_sync_literature_rejects_a_bad_force_target_before_any_fetch(tmp_path, m
 # ---------------------------------------------------------------------------
 
 
-def _stub_docs_discovery(monkeypatch, pages: list[PageContent], *, discovery: str = "sphinx", version: str | None = "1.0") -> None:
+def _stub_docs_discovery(
+    monkeypatch,
+    pages: list[PageContent],
+    *,
+    discovery: str = "sphinx",
+    version: str | None = "1.0",
+) -> list[str]:
+    """Stub the docs fetch layer; returns the list it records requests into."""
+    fetched: list[str] = []
     monkeypatch.setattr(reconcile, "probe_discovery_mode", lambda client, base_url, timeout: discovery)
     monkeypatch.setattr(reconcile, "fetch_version", lambda client, base_url, timeout: version)
 
-    def fake_iter_project_pages(client, project, *, delay=0.2, timeout=30, max_pages=300, max_depth=5):
-        yield from pages
+    def fake_iter_project_pages(
+        client, project, *, delay=0.2, timeout=30, max_pages=300, max_depth=5,
+        have_page=None,
+    ):
+        # Honours `have_page` the way the real sphinx iterator does, so these
+        # tests exercise the skip *before* the fetch rather than only the
+        # bookkeeping after it. `fetched` records what was actually asked
+        # for.
+        for page in pages:
+            if have_page is not None and have_page(page.docname):
+                yield PageContent(
+                    docname=page.docname, markdown=None,
+                    page_url=page.page_url, not_fetched=True,
+                )
+                continue
+            fetched.append(page.docname)
+            yield page
     monkeypatch.setattr(reconcile, "iter_project_pages", fake_iter_project_pages)
+    return fetched
 
 
 def test_sync_docs_project_adds_new_pages(tmp_path, monkeypatch):
@@ -335,6 +359,57 @@ def test_sync_docs_project_skips_an_existing_page_unless_forced(tmp_path, monkey
 
     assert (result.added, result.skipped, result.refetched) == (0, 1, 0)
     assert "Old body." in existing_path.read_text(encoding="utf-8")
+
+
+def test_sync_docs_project_does_not_download_a_page_it_already_has(tmp_path, monkeypatch):
+    """The skip has always been right about what to *write*; it decided after
+    the page had been downloaded and converted, so a second `corpus sync`
+    re-pulled all 98 pages and discarded every one. Measured on 2026-09-08:
+    three pages, three requests on the second run.
+
+    Nothing new records what was pulled - the documents already do, through
+    `docs.project`/`docs.page`. The fix was to ask before fetching rather
+    than after, which is the same defect the MinerU path had (hash first,
+    convert second).
+    """
+    pages = [
+        PageContent(docname="index", markdown="# Index\n\nIntro.\n"),
+        PageContent(docname="guide", markdown="# Guide\n\nHow to.\n"),
+    ]
+    fetched = _stub_docs_discovery(monkeypatch, pages)
+    project = DocsProject(project="stimela", base_url="https://stimela.readthedocs.io/en/latest/")
+
+    first = reconcile.sync_docs_project(tmp_path, project, delay=0.0)
+    assert (first.added, sorted(fetched)) == (2, ["guide", "index"])
+
+    fetched.clear()
+    second = reconcile.sync_docs_project(tmp_path, project, delay=0.0)
+
+    assert second.skipped == 2
+    assert second.added == 0
+    assert fetched == []
+
+
+def test_sync_docs_project_still_downloads_a_forced_page(tmp_path, monkeypatch):
+    """--force is the way back to the old behaviour, for one page or all of
+    them: it is the only thing that can pick up an upstream edit, since a
+    page already on disk is otherwise never requested again."""
+    pages = [
+        PageContent(docname="index", markdown="# Index\n\nIntro.\n"),
+        PageContent(docname="guide", markdown="# Guide\n\nHow to.\n"),
+    ]
+    fetched = _stub_docs_discovery(monkeypatch, pages)
+    project = DocsProject(project="stimela", base_url="https://stimela.readthedocs.io/en/latest/")
+    reconcile.sync_docs_project(tmp_path, project, delay=0.0)
+    fetched.clear()
+
+    result = reconcile.sync_docs_project(
+        tmp_path, project, delay=0.0, force_paths=["stimela/Guide.md"]
+    )
+
+    assert result.refetched == 1
+    assert result.skipped == 1
+    assert fetched == ["guide"]
 
 
 def test_sync_docs_project_force_refetches_in_place(tmp_path, monkeypatch):
@@ -450,7 +525,10 @@ def test_sync_docs_converges_every_manifest_project_and_reports_one_result_each(
     monkeypatch.setattr(reconcile, "probe_discovery_mode", lambda client, base_url, timeout: "sphinx")
     monkeypatch.setattr(reconcile, "fetch_version", lambda client, base_url, timeout: "1.0")
 
-    def fake_iter_project_pages(client, project, *, delay=0.2, timeout=30, max_pages=300, max_depth=5):
+    def fake_iter_project_pages(
+        client, project, *, delay=0.2, timeout=30, max_pages=300, max_depth=5,
+        have_page=None,
+    ):
         yield PageContent(docname="index", markdown=f"# {project.project} index\n")
     monkeypatch.setattr(reconcile, "iter_project_pages", fake_iter_project_pages)
 
@@ -474,7 +552,10 @@ def test_sync_docs_walks_the_collection_once_regardless_of_project_count(tmp_pat
     monkeypatch.setattr(reconcile, "probe_discovery_mode", lambda client, base_url, timeout: "sphinx")
     monkeypatch.setattr(reconcile, "fetch_version", lambda client, base_url, timeout: "1.0")
 
-    def fake_iter_project_pages(client, project, *, delay=0.2, timeout=30, max_pages=300, max_depth=5):
+    def fake_iter_project_pages(
+        client, project, *, delay=0.2, timeout=30, max_pages=300, max_depth=5,
+        have_page=None,
+    ):
         yield PageContent(docname="index", markdown=f"# {project.project} index\n")
     monkeypatch.setattr(reconcile, "iter_project_pages", fake_iter_project_pages)
 
@@ -522,7 +603,7 @@ def test_sync_literature_walks_the_collection_once_per_call(tmp_path, monkeypatc
 # The fetch/read boundary
 # ---------------------------------------------------------------------------
 #
-# What `corpus fetch` writes has to satisfy the same schema every other reader
+# What `corpus sync` writes has to satisfy the same schema every other reader
 # of the corpus assumes. Nothing used to check that: `reconcile` wrote a flat
 # `citekey`/`project` frontmatter and diffed it with flat key fields, so it
 # agreed with itself while `corpus status`/`list`/`tree` (which key on

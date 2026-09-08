@@ -46,12 +46,21 @@ def runner() -> CliRunner:
 def tmp_corpus_dirs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Path]:
     """Point LITERATURE_DIR/DOCS_DIR/NOTES_DIR at empty tmp directories
     instead of the real machine-global defaults - hermetic, and never
-    touches a developer's own fetched corpus."""
+    touches a developer's own fetched corpus.
+
+    The directories are actually created, which the fixture claimed but did
+    not do. `corpus status` now distinguishes a collection that is empty
+    from one that has no directory at all, so a corpus root that does not
+    exist is a different fixture (see the absent-corpus tests below), not a
+    stand-in for an empty one.
+    """
     dirs = {
         "literature": tmp_path / "literature",
         "docs": tmp_path / "docs",
         "notes": tmp_path / "notes",
     }
+    for corpus_dir in dirs.values():
+        corpus_dir.mkdir(parents=True)
     monkeypatch.setattr(cli, "LITERATURE_DIR", dirs["literature"])
     monkeypatch.setattr(cli, "DOCS_DIR", dirs["docs"])
     monkeypatch.setattr(cli, "NOTES_DIR", dirs["notes"])
@@ -109,7 +118,7 @@ def test_corpus_add_notes_takes_several_identifiers_at_once(
     assert result.exit_code == 0, result.output
     assert "2 added" in result.output
     # The build hint is printed once for the batch, not once per document.
-    assert result.output.count("index build") == 1
+    assert result.output.count("corpus index") == 1
 
 
 def test_corpus_add_notes_writes_the_nested_frontmatter_schema(
@@ -463,7 +472,7 @@ def test_corpus_add_literature_hints_at_the_collection_the_review_wrote_to(
     result = runner.invoke(cli.cli, ["corpus", "add", "-l", str(source)])
 
     assert result.exit_code == 0, result.output
-    assert "index build --collection notes" in _plain(result.output)
+    assert "corpus index --collection notes" in _plain(result.output)
     assert list(tmp_corpus_dirs["notes"].rglob("*.md"))
 
 
@@ -871,7 +880,7 @@ def test_corpus_remove_names_the_listing_command_for_an_unknown_id(
 
 
 # ---------------------------------------------------------------------------
-# corpus fetch
+# corpus sync
 # ---------------------------------------------------------------------------
 
 
@@ -888,13 +897,13 @@ def test_corpus_fetch_literature_reports_counts(
         ]
     monkeypatch.setattr(cli, "sync_literature", fake_sync_literature)
 
-    result = runner.invoke(cli.cli, ["corpus", "fetch", "--collection", "literature"])
+    result = runner.invoke(cli.cli, ["corpus", "sync", "--collection", "literature"])
 
     assert result.exit_code == 0, result.output
     output = _plain(result.output)
     assert "1 added" in output
     assert "1 deleted" in output
-    assert "boepie index build --collection literature" in output
+    assert "boepie corpus index --collection literature" in output
 
 
 def test_corpus_fetch_literature_reports_unavailable_papers(
@@ -907,7 +916,7 @@ def test_corpus_fetch_literature_reports_unavailable_papers(
         return [LiteratureSyncResult(citekey="perkins2025", action="unavailable")]
     monkeypatch.setattr(cli, "sync_literature", fake_sync_literature)
 
-    result = runner.invoke(cli.cli, ["corpus", "fetch", "--collection", "literature"])
+    result = runner.invoke(cli.cli, ["corpus", "sync", "--collection", "literature"])
 
     assert result.exit_code == 0, result.output
     assert "no HTML" in result.output
@@ -926,7 +935,7 @@ def test_corpus_fetch_literature_rejects_a_bad_force_target(
     monkeypatch.setattr(cli, "sync_literature", fake_sync_literature)
 
     result = runner.invoke(
-        cli.cli, ["corpus", "fetch", "--collection", "literature", "--force", "Nowhere.md"],
+        cli.cli, ["corpus", "sync", "--collection", "literature", "--force", "Nowhere.md"],
     )
 
     assert result.exit_code != 0
@@ -943,13 +952,15 @@ def test_corpus_fetch_docs_reports_counts_across_projects(
         return [DocsSyncResult(project="stimela", added=2, skipped=1, refetched=0, deleted=0, failures=[])]
     monkeypatch.setattr(cli, "sync_docs", fake_sync_docs)
 
-    result = runner.invoke(cli.cli, ["corpus", "fetch", "--collection", "docs"])
+    result = runner.invoke(cli.cli, ["corpus", "sync", "--collection", "docs"])
 
     assert result.exit_code == 0, result.output
     output = _plain(result.output)
     assert "2 added" in output
-    assert "1 skipped" in output
-    assert "boepie index build --collection docs" in output
+    # "unchanged", not "skipped": a skip is a decision boepie made, and
+    # these pages were simply already current.
+    assert "1 unchanged" in output
+    assert "boepie corpus index --collection docs" in output
 
 
 def test_corpus_fetch_explains_why_notes_has_nothing_to_fetch(
@@ -957,7 +968,7 @@ def test_corpus_fetch_explains_why_notes_has_nothing_to_fetch(
 ) -> None:
     """Accepted rather than rejected as an invalid choice: the reason is
     worth stating, and "not one of literature, docs" does not state it."""
-    result = runner.invoke(cli.cli, ["corpus", "fetch", "--collection", "notes"])
+    result = runner.invoke(cli.cli, ["corpus", "sync", "--collection", "notes"])
 
     assert result.exit_code == 0, result.output
     output = _plain(result.output)
@@ -969,7 +980,7 @@ def test_corpus_fetch_explains_why_notes_has_nothing_to_fetch(
 def test_corpus_fetch_rejects_an_unknown_collection(
     runner: CliRunner, tmp_corpus_dirs: dict[str, Path]
 ) -> None:
-    result = runner.invoke(cli.cli, ["corpus", "fetch", "--collection", "nope"])
+    result = runner.invoke(cli.cli, ["corpus", "sync", "--collection", "nope"])
 
     assert result.exit_code != 0
     assert "nope" in result.output
@@ -989,7 +1000,7 @@ def test_corpus_fetch_defaults_to_the_manifest_backed_collections(
         cli, "_corpus_fetch_docs", lambda *args, **kwargs: reconciled.append("docs")
     )
 
-    result = runner.invoke(cli.cli, ["corpus", "fetch"])
+    result = runner.invoke(cli.cli, ["corpus", "sync"])
 
     assert result.exit_code == 0, result.output
     assert reconciled == ["literature", "docs"]
@@ -1008,7 +1019,7 @@ def test_corpus_fetch_accepts_a_comma_separated_list(
     )
 
     result = runner.invoke(
-        cli.cli, ["corpus", "fetch", "--collection", "docs,literature"]
+        cli.cli, ["corpus", "sync", "--collection", "docs,literature"]
     )
 
     assert result.exit_code == 0, result.output
@@ -1019,6 +1030,91 @@ def test_corpus_fetch_accepts_a_comma_separated_list(
 # ---------------------------------------------------------------------------
 # corpus status
 # ---------------------------------------------------------------------------
+
+
+def test_corpus_status_refuses_a_machine_with_no_corpus_at_all(
+    tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The output this replaces described three directories that do not
+    exist, counted zero documents in each, and then listed all 17 manifest
+    citekeys and 3 projects under `missing:` - a wall of text about a corpus
+    that has no place on this machine yet. `context status` already refuses
+    this way when there is no bundle."""
+    for name in ("literature", "docs", "notes"):
+        monkeypatch.setattr(cli, f"{name.upper()}_DIR", tmp_path / name)
+
+    result = runner.invoke(cli.cli, ["corpus", "status"])
+
+    assert result.exit_code != 0
+    output = _plain(result.output)
+    assert "no corpus on this machine" in output
+    assert "boepie init" in output
+    # The manifest is not diffed against a corpus that does not exist.
+    assert "not fetched yet" not in output
+
+
+def test_corpus_status_names_init_for_a_lone_collection_too(
+    tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One command creates a corpus directory and it creates all three. This
+    used to name `setup`, which populates literature and docs and never
+    notes - so `--collection notes` was told to run something that would not
+    have created it."""
+    for name in ("literature", "docs", "notes"):
+        monkeypatch.setattr(cli, f"{name.upper()}_DIR", tmp_path / name)
+
+    result = runner.invoke(cli.cli, ["corpus", "status", "--collection", "notes"])
+
+    assert result.exit_code != 0
+    output = _plain(result.output)
+    assert "boepie init" in output
+    assert "boepie setup" not in output
+
+
+def test_corpus_status_reports_an_absent_collection_beside_a_present_one(
+    tmp_path: Path, runner: CliRunner, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Refusing outright would be wrong here: one collection has something to
+    say, so the other gets a row rather than taking the whole command down."""
+    for name in ("literature", "docs", "notes"):
+        monkeypatch.setattr(cli, f"{name.upper()}_DIR", tmp_path / name)
+    (tmp_path / "notes").mkdir()
+    monkeypatch.setattr(cli, "load_literature_manifest", lambda corpus_dir: [])
+    monkeypatch.setattr(
+        cli,
+        "collection_index",
+        lambda collection_dir, *, collection, key_fields: [],
+    )
+
+    result = runner.invoke(cli.cli, ["corpus", "status"])
+
+    assert result.exit_code == 0, result.output
+    output = _plain(result.output)
+    assert "not created yet" in output
+    assert "boepie init" in output
+    # notes exists, so it is counted rather than called absent.
+    assert "0 total, 0 boepie-managed, 0 yours" in output
+
+
+def test_corpus_status_separates_an_empty_collection_from_an_absent_one(
+    runner: CliRunner, tmp_corpus_dirs: dict[str, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A directory that exists and holds nothing is a real answer - you
+    fetched and it came back empty, or you removed the last document - and it
+    must not be reported as never having been set up."""
+    monkeypatch.setattr(cli, "load_literature_manifest", lambda corpus_dir: [])
+    monkeypatch.setattr(
+        cli,
+        "collection_index",
+        lambda collection_dir, *, collection, key_fields: [],
+    )
+
+    result = runner.invoke(cli.cli, ["corpus", "status", "--collection", "literature"])
+
+    assert result.exit_code == 0, result.output
+    output = _plain(result.output)
+    assert "0 total, 0 boepie-managed, 0 yours" in output
+    assert "not created yet" not in output
 
 
 def test_corpus_status_literature_reports_fetched_and_not_fetched(
@@ -1037,7 +1133,8 @@ def test_corpus_status_literature_reports_fetched_and_not_fetched(
     assert result.exit_code == 0, result.output
     output = _plain(result.output)
     assert "1 total, 1 boepie-managed, 0 yours" in output
-    assert "1 paper(s) in the manifest not fetched yet" in output
+    # `1 paper`, not `1 paper(s)`: the count and its noun agree now.
+    assert "1 paper in the manifest not fetched yet" in output
     assert "notyet2020" in output
 
 
@@ -1141,7 +1238,7 @@ def test_corpus_status_docs_reports_page_counts_per_project(
     assert result.exit_code == 0, result.output
     output = _plain(result.output)
     assert "3 total, 3 boepie-managed, 0 yours" in output
-    assert "in step with the packaged manifest" in output
+    assert "current with the one boepie ships" in output
 
 
 def test_corpus_status_notes_reports_a_count(
@@ -1370,3 +1467,53 @@ def test_corpus_add_group_prefixes_a_walked_folder_rather_than_flattening_it(
     notes = tmp_corpus_dirs["notes"]
     assert (notes / "quartical" / "B.md").is_file()
     assert (notes / "quartical" / "gains" / "A.md").is_file()
+
+
+# ---------------------------------------------------------------------------
+# corpus init: the scaffold half
+# ---------------------------------------------------------------------------
+
+
+def test_corpus_init_creates_the_directories_and_fetches_nothing(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Until this existed the only thing that made a corpus directory was
+    writing the first document into it, so a corpus came into being as a side
+    effect of a write - and a mistyped BOEPIE_LITERATURE_DIR silently made a
+    second one at the wrong path."""
+    directories = {name: tmp_path / name for name in ("literature", "docs", "notes")}
+    for name, path in directories.items():
+        monkeypatch.setattr(cli, f"{name.upper()}_DIR", path)
+
+    result = runner.invoke(cli.cli, ["corpus", "init"])
+
+    assert result.exit_code == 0, result.output
+    assert all(path.is_dir() for path in directories.values())
+    # Empty: filling them is `corpus sync`'s job.
+    assert all(not any(path.iterdir()) for path in directories.values())
+
+
+def test_corpus_init_is_idempotent(
+    runner: CliRunner, tmp_corpus_dirs: dict[str, Path]
+) -> None:
+    """Every workspace on a machine runs `boepie init`, and they share these
+    three directories - so the second project has to find them made rather
+    than getting its own."""
+    result = runner.invoke(cli.cli, ["corpus", "init"])
+
+    assert result.exit_code == 0, result.output
+    assert "Checked" in _plain(result.output)
+    assert "Created" not in _plain(result.output)
+
+
+def test_corpus_sync_refuses_a_corpus_that_was_never_created(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in ("literature", "docs", "notes"):
+        monkeypatch.setattr(cli, f"{name.upper()}_DIR", tmp_path / name)
+
+    result = runner.invoke(cli.cli, ["corpus", "sync", "--collection", "literature"])
+
+    assert result.exit_code != 0
+    assert "no corpus on this machine" in _plain(result.output)
+    assert "boepie init" in _plain(result.output)

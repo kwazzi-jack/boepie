@@ -526,7 +526,8 @@ def convert_with_mineru(
             )
         except subprocess.TimeoutExpired as expired:
             raise IntakeError(
-                f"mineru did not finish converting {len(paths)} document(s) within "
+                f"mineru did not finish converting {len(paths)} "
+                f"{'document' if len(paths) == 1 else 'documents'} within "
                 f"{timeout_seconds}s and was cancelled. Nothing was written. Try a "
                 f"smaller `mineru.batch_size`, or convert the documents in smaller "
                 f"batches."

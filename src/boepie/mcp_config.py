@@ -404,6 +404,77 @@ def _already_registered(target: AgentTarget, directory: Path) -> bool:
     return completed.returncode == 0
 
 
+@dataclass(frozen=True)
+class TargetInspection:
+    """What one agent's config says, read without writing anything.
+
+    `apply_target` answers "did I have to change this"; this answers "is what
+    is there right", which is a different question and the one that matters
+    when an agent silently lists no boepie tools. The usual cause is a
+    registration pointing at a boepie in a different venv - one installed as
+    a tool, or left behind by a rebuilt environment - and nothing in the
+    agent says so.
+    """
+
+    name: str
+    # absent | current | stale | missing | opaque
+    state: str
+    path: Path | None = None
+    # The command the config actually launches, when it can be read back.
+    registered_command: list[str] | None = None
+    detail: str = ""
+
+
+def inspect_target(name: str, directory: Path, command: list[str]) -> TargetInspection:
+    """Report what `name`'s config holds for boepie, changing nothing.
+
+    `opaque` is its own answer rather than being folded into `current`: a
+    CLI-only target (codex, gemini) can be asked *whether* it knows the
+    server but not *what* it would launch, and claiming the path is right
+    when it cannot be read would be the same wrong answer this exists to
+    catch.
+    """
+    target = target_named(name)
+    if installed_executable(target) is None:
+        return TargetInspection(
+            name,
+            "absent",
+            detail=f"not installed (looked for {', '.join(target.executables)})",
+        )
+
+    if target.relative_path is None:
+        if _already_registered(target, directory):
+            return TargetInspection(
+                name, "opaque", detail="registered through its own CLI"
+            )
+        return TargetInspection(name, "missing", detail="its own CLI has no entry")
+
+    path = directory / target.relative_path
+    if not path.is_file():
+        return TargetInspection(name, "missing", path, detail="no config file")
+
+    try:
+        servers = _read_json(path).get(target.container) or {}
+    except McpConfigError as error:
+        return TargetInspection(name, "missing", path, detail=str(error))
+    existing = servers.get(SERVER_NAME) if isinstance(servers, dict) else None
+    if not isinstance(existing, dict):
+        return TargetInspection(name, "missing", path, detail="no boepie entry")
+
+    registered = [str(existing.get("command") or "")] + [
+        str(argument) for argument in existing.get("args") or []
+    ]
+    if _same_server(existing, _stdio_entry(command)):
+        return TargetInspection(name, "current", path, registered)
+    return TargetInspection(
+        name,
+        "stale",
+        path,
+        registered,
+        detail="launches a different boepie than the one running this command",
+    )
+
+
 def apply_target(
     name: str, directory: Path, command: list[str], *, force: bool
 ) -> TargetResult:

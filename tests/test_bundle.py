@@ -153,7 +153,7 @@ def test_status_flags_a_bundle_behind_the_installed_content(tmp_path: Path) -> N
     status = bundle.bundle_status(tmp_path)
     assert status.state == "stale"
     assert "content_sha256" in status.detail
-    assert "boepie context apply" in status.detail
+    assert "boepie context sync" in status.detail
     assert status.installed_content_sha256 == asset_checksum(context_content_dir())
 
 
@@ -167,7 +167,7 @@ def test_status_on_a_bundle_from_an_older_boepie_names_the_fix(tmp_path: Path) -
     `content_sha256`, so the dataclass rejects the old shape - correctly, since
     neither field can be derived from the other. What it must not do is
     surface as a `TypeError` from inside `_read_manifest`, three frames below
-    anything that names `context apply`."""
+    anything that names `context sync`."""
     bundle.init_bundle(tmp_path)
 
     manifest_path = tmp_path / ".boepie" / "manifest.json"
@@ -181,7 +181,7 @@ def test_status_on_a_bundle_from_an_older_boepie_names_the_fix(tmp_path: Path) -
         bundle.bundle_status(tmp_path)
 
     assert "0.3.0" in str(error.value)
-    assert "boepie context apply" in str(error.value)
+    assert "boepie context sync" in str(error.value)
 
 
 def test_status_on_an_unparseable_manifest_names_the_file_and_the_fix(
@@ -197,7 +197,7 @@ def test_status_on_an_unparseable_manifest_names_the_file_and_the_fix(
         bundle.bundle_status(tmp_path)
 
     assert "manifest.json" in str(error.value)
-    assert "boepie context apply" in str(error.value)
+    assert "boepie context sync" in str(error.value)
 
 
 def test_status_on_a_manifest_that_is_not_an_object_names_the_fix(
@@ -211,7 +211,7 @@ def test_status_on_a_manifest_that_is_not_an_object_names_the_fix(
     with pytest.raises(ValueError) as error:
         bundle.bundle_status(tmp_path)
 
-    assert "boepie context apply" in str(error.value)
+    assert "boepie context sync" in str(error.value)
 
 
 def test_apply_rewrites_an_unparseable_manifest(tmp_path: Path) -> None:

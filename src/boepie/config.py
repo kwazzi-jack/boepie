@@ -42,7 +42,7 @@ _SETTINGS = settings.load()
 # same-named-wrapper-directory leaf (see boepie.corpus.layout's recursive
 # group-walking rule), each carrying a surrogate `id` and `managed_by: boepie |
 # local` in its YAML frontmatter (boepie.corpus.document) rather than a
-# {citekey}/metadata.json sidecar. Populated by `boepie corpus fetch
+# {citekey}/metadata.json sidecar. Populated by `boepie corpus sync
 # --collection literature` (arXiv HTML, converted locally) and `boepie corpus
 # add literature <arxiv_id>`, and optionally supplemented with
 # `scripts/corpus_to_md.py` (BYO-PDF, also local, and not yet migrated to
@@ -55,7 +55,7 @@ LITERATURE_DIR: Path = Path(
 )
 
 # Where the upstream docs corpus lives. One writer only: `boepie corpus add
-# docs` / `corpus fetch --collection docs` (`boepie.corpus.reconcile.sync_docs`,
+# docs` / `corpus sync --collection docs` (`boepie.corpus.reconcile.sync_docs`,
 # the corpus layout - a document per leaf with a surrogate `id` and
 # `managed_by: boepie | user` in frontmatter, see boepie.corpus.layout). A
 # second, dev-time writer producing `{project}/{docname}.md` + `metadata.json`
@@ -180,7 +180,7 @@ RRF_K: int = 60
 # Literature: arXiv-vs-PDF preference
 # ---------------------------------------------------------------------------
 
-# When True, `corpus fetch --collection literature`/`corpus add literature`
+# When True, `corpus sync --collection literature`/`corpus add literature`
 # resolve each paper's DOI via Unpaywall and prefer a legitimately
 # open-access published PDF (converted locally with MinerU) over the arXiv
 # HTML rendering, on the reasoning that the published version is the
@@ -190,7 +190,7 @@ RRF_K: int = 60
 LITERATURE_PREFER_PDF: bool = _SETTINGS.literature.prefer_pdf
 
 # Seconds between paper fetches - politeness towards arxiv.org/ar5iv/Unpaywall,
-# not an API requirement. `boepie corpus fetch --collection literature --delay`
+# not an API requirement. `boepie corpus sync --collection literature --delay`
 # overrides per run.
 LITERATURE_FETCH_DELAY: float = _SETTINGS.literature.fetch_delay
 

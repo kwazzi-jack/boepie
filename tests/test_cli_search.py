@@ -225,7 +225,7 @@ def test_search_missing_index_names_the_fix(runner: CliRunner, empty_index: Path
     )
     assert result.exit_code != 0
     assert "no 'docs' index" in result.output
-    assert "index build --collection docs" in result.output
+    assert "corpus index --collection docs" in result.output
 
 
 def test_search_context_without_bundle_says_init(

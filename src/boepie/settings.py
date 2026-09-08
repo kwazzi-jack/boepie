@@ -268,7 +268,7 @@ class SyncSettings(BaseModel):
 
     NOT IMPLEMENTED. Declared for future development and listed in
     `_DEFERRED_SECTIONS`, so none of these keys appears in `config show` or
-    `config create` and none can be set. Nothing reads any of them: there is
+    `config init` and none can be set. Nothing reads any of them: there is
     no staleness check, no nudge, and no version lookup. Kept because the
     shape of the setting is the decision that was made - what would be
     tunable if the feature existed - and re-deriving that later is the
@@ -288,7 +288,7 @@ class SyncSettings(BaseModel):
 
 # Sections the schema declares but nothing yet reads. They are hidden from
 # every surface that would present them as usable - `config show`,
-# `config create`, `config get`/`set` - because a setting a user can change
+# `config init`, `config get`/`set` - because a setting a user can change
 # and boepie then ignores is worse than no setting at all: it reads as a
 # switch that is broken rather than as a feature that is absent. The models
 # stay declared so the intended shape is not lost; delete a name from here
@@ -441,7 +441,7 @@ def load() -> BoepieSettings:
     Raises `ConfigError` - naming the offending key, or the syntax error's
     position - rather than letting pydantic's or tomllib's own traceback
     surface. The cause is almost always something the user typed into a file
-    they can go and edit, and `config create` writes that file expecting
+    they can go and edit, and `config init` writes that file expecting
     them to.
     """
     try:

@@ -1,4 +1,4 @@
-"""ArXiv paper manifest: which papers `boepie corpus fetch --collection
+"""ArXiv paper manifest: which papers `boepie corpus sync --collection
 literature` converts.
 
 One source only: the packaged ``default_manifest.json`` (tracked in git,
@@ -62,7 +62,7 @@ def load_default_manifest() -> list[ArxivPaper]:
     return _read_papers(literature_manifest_path())
 
 def load_manifest(corpus_dir: Path) -> list[ArxivPaper]:
-    """Every paper `corpus fetch` reconciles against.
+    """Every paper `corpus sync` reconciles against.
 
     Takes `corpus_dir` it no longer reads, so callers do not have to care
     whether a collection has a per-machine manifest component; none does any

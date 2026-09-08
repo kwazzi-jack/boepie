@@ -3,7 +3,7 @@
 A bundle document is a markdown file with an optional leading YAML block
 delimited by ``---`` lines. Every managed document carries the OKF fields
 (``type``, ``title``, ``description``, ``tags``) plus boepie's own
-``managed_by: boepie | user`` field that ``context apply`` reads to decide
+``managed_by: boepie | user`` field that ``context sync`` reads to decide
 whether a file is safe to regenerate. ``index.md`` and ``apply-log.md`` are
 the OKF reserved files and carry no frontmatter at all: reading them returns
 an empty mapping and the whole file as body.

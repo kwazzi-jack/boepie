@@ -76,7 +76,7 @@ class CorpusRevision:
       *wrong* - it serves text that is no longer there, under a `source_path`
       an agent is invited to open with its own file tools;
     - a document that is **new** since the build makes it merely *incomplete*,
-      which is the normal state between `corpus add` and `index build` and
+      which is the normal state between `corpus add` and `corpus index` and
       must not be an error, or the documented staging workflow would break
       search between every add and the rebuild that follows it.
     """
@@ -294,12 +294,19 @@ class DocsLoader(_CorpusLoader):
 # ---------------------------------------------------------------------------
 
 
+# Bundle files that exist for a reader rather than for a searcher. A
+# dot-prefixed name is excluded too, by the dot-part check below - so a user
+# who wants one of their own files out of the index can simply rename it,
+# with no list to edit.
+_NOT_KNOWLEDGE = frozenset({"apply-log.md", "index.md", "skeleton.md"})
+
+
 class ContextLoader:
     """Loads the curated context bundle from ``.boepie/``.
 
-    Each markdown file under the bundle directory (except apply-log.md and
-    anything under a dot-directory such as the derived `.index/`) becomes one
-    document. Document IDs are the POSIX relative path without the suffix
+    Each markdown file under the bundle directory becomes one document,
+    except the ones in `_NOT_KNOWLEDGE` and anything dot-prefixed (the
+    derived `.index/`, and any file a user has hidden deliberately). Document IDs are the POSIX relative path without the suffix
     (e.g. "concepts/substitution" for ".boepie/concepts/substitution.md").
     Frontmatter is parsed using boepie.context.frontmatter helpers into
     Document.metadata. The body text (with frontmatter stripped) is the
@@ -330,7 +337,7 @@ class ContextLoader:
         every chunk is already built by the time it is called, and losing the
         whole build over a damaged sidecar would be the wrong trade. The
         commands that actually depend on the manifest -
-        ``bundle_status``/``context apply`` - fail loudly on it instead.
+        ``bundle_status``/``context sync`` - fail loudly on it instead.
         """
         sources: dict[str, Any] = {"bundle_dir": self.bundle_dir.name}
 
@@ -349,11 +356,15 @@ class ContextLoader:
 
         md_paths = sorted(self.bundle_dir.rglob("*.md"))
         for md_path in md_paths:
+            # Three kinds of bundle file that are not knowledge:
             # apply-log.md is append-only bundle history; index.md is the
             # navigation entry point the agent is told to read first anyway
-            # (its escalation table isn't a search answer). Neither belongs
-            # in the search corpus.
-            if md_path.name in ("apply-log.md", "index.md"):
+            # (its escalation table isn't a search answer); and skeleton.md
+            # is the empty template showing what a hand-written file of that
+            # kind looks like, so it matches every query about its own
+            # section and answers none of them. Found 2026-09-08 in real
+            # search output.
+            if md_path.name in _NOT_KNOWLEDGE:
                 continue
 
             relative_path = md_path.relative_to(self.bundle_dir)

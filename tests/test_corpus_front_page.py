@@ -23,7 +23,7 @@ import httpx
 import pytest
 
 from boepie.corpus.add import AddOptions, add_literature
-from boepie.corpus.intake import Converted, MineruResult, front_page_text
+from boepie.corpus.intake import MineruResult, front_page_text
 from boepie.corpus.layout import lookup_path
 from boepie.context.frontmatter import read_frontmatter
 
@@ -376,7 +376,7 @@ def test_a_bib_entry_still_wins_over_the_page(
 
 def test_arxiv_courtesy_pause_spaces_consecutive_calls(monkeypatch: pytest.MonkeyPatch) -> None:
     """A folder of fifty PDFs is fifty metadata lookups, and firing those back
-    to back is how an IP gets throttled. `corpus fetch` has always spaced its
+    to back is how an IP gets throttled. `corpus sync` has always spaced its
     requests; `add` reaches the same API and now does too."""
     from boepie.corpus import add as add_module
 

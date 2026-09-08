@@ -90,12 +90,22 @@ def test_context_init_pointer_idempotent(runner: CliRunner, tmp_path: Path, tmp_
         assert pointer_count == 1
 
 
-def test_context_init_builds_bm25_index_inside_the_bundle(
+def test_context_index_builds_bm25_index_inside_the_bundle(
     runner: CliRunner, tmp_path: Path, tmp_index_dir: Path
 ) -> None:
-    """The index belongs to the bundle it was built from, not to the machine."""
+    """The index belongs to the bundle it was built from, not to the machine.
+
+    Built by `context index`, not by `init` or `sync`: populating a bundle
+    and indexing it are two steps with two owners, the same way `corpus sync`
+    leaves `corpus index` to follow it.
+    """
     with patch("boepie.cli.INDEX_DIR", tmp_index_dir):
-        result = runner.invoke(cli.cli, ["context", "init", "--directory", str(tmp_path)])
+        assert runner.invoke(
+            cli.cli, ["context", "init", "--directory", str(tmp_path)]
+        ).exit_code == 0
+        result = runner.invoke(
+            cli.cli, ["context", "index", "--directory", str(tmp_path)]
+        )
 
     assert result.exit_code == 0
     context_index = _context_index_dir(tmp_path)
@@ -123,7 +133,7 @@ def test_context_apply_keeps_the_gitignore_line_unduplicated(
 ) -> None:
     with patch("boepie.cli.INDEX_DIR", tmp_index_dir):
         assert runner.invoke(cli.cli, ["context", "init", "--directory", str(tmp_path)]).exit_code == 0
-        assert runner.invoke(cli.cli, ["context", "apply", "--directory", str(tmp_path)]).exit_code == 0
+        assert runner.invoke(cli.cli, ["context", "sync", "--directory", str(tmp_path)]).exit_code == 0
 
     gitignore_text = (tmp_path / ".boepie" / ".gitignore").read_text(encoding="utf-8")
     assert gitignore_text.count(".index/") == 1
@@ -140,10 +150,18 @@ def test_two_projects_each_keep_their_own_index(
     project_b.mkdir()
 
     with patch("boepie.cli.INDEX_DIR", tmp_index_dir):
-        assert runner.invoke(cli.cli, ["context", "init", "--directory", str(project_a)]).exit_code == 0
+        for project in (project_a, project_b):
+            assert runner.invoke(
+                cli.cli, ["context", "init", "--directory", str(project)]
+            ).exit_code == 0
+        assert runner.invoke(
+            cli.cli, ["context", "index", "--directory", str(project_a)]
+        ).exit_code == 0
         chunks_a_before = (_context_index_dir(project_a) / "chunks.jsonl").read_bytes()
 
-        assert runner.invoke(cli.cli, ["context", "init", "--directory", str(project_b)]).exit_code == 0
+        assert runner.invoke(
+            cli.cli, ["context", "index", "--directory", str(project_b)]
+        ).exit_code == 0
 
     assert _context_index_dir(project_a).exists()
     assert _context_index_dir(project_b).exists()
@@ -185,20 +203,26 @@ def test_context_init_with_hooks_flag(runner: CliRunner, tmp_path: Path, tmp_ind
 
 
 # ---------------------------------------------------------------------------
-# context apply
+# context sync
 # ---------------------------------------------------------------------------
 
 
-def test_context_apply_rebuilds_index(runner: CliRunner, tmp_path: Path, tmp_index_dir: Path) -> None:
-    """Apply should rebuild the context index."""
+def test_context_sync_leaves_the_index_to_its_own_verb(
+    runner: CliRunner, tmp_path: Path, tmp_index_dir: Path
+) -> None:
+    """`context sync` converges the bundle and stops. It was the only noun
+    that both converged and indexed, so it was the one place the model lied -
+    and it closes by naming the step it no longer takes."""
     with patch("boepie.cli.INDEX_DIR", tmp_index_dir):
-        # First init.
         result_init = runner.invoke(cli.cli, ["context", "init", "--directory", str(tmp_path)])
         assert result_init.exit_code == 0
+        assert runner.invoke(
+            cli.cli, ["context", "index", "--directory", str(tmp_path)]
+        ).exit_code == 0
 
-        # Then apply.
-        result_apply = runner.invoke(cli.cli, ["context", "apply", "--directory", str(tmp_path)])
+        result_apply = runner.invoke(cli.cli, ["context", "sync", "--directory", str(tmp_path)])
         assert result_apply.exit_code == 0, result_apply.output
+        assert "boepie context index" in result_apply.output
 
         # Index should still exist after apply.
         assert _context_index_dir(tmp_path).exists()
@@ -228,7 +252,7 @@ def test_context_apply_force_reverts_a_source_local_file(
 
         result = runner.invoke(
             cli.cli,
-            ["context", "apply", "--directory", str(tmp_path), "--force", "concepts/skeleton.md"],
+            ["context", "sync", "--directory", str(tmp_path), "--force", "concepts/skeleton.md"],
         )
 
     assert result.exit_code == 0, result.output
@@ -251,7 +275,7 @@ def test_context_apply_force_on_a_nonexistent_path_exits_non_zero(
 
         result = runner.invoke(
             cli.cli,
-            ["context", "apply", "--directory", str(tmp_path), "--force", "nonexistent/path.md"],
+            ["context", "sync", "--directory", str(tmp_path), "--force", "nonexistent/path.md"],
         )
 
     assert result.exit_code != 0

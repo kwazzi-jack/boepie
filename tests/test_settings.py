@@ -147,7 +147,7 @@ def test_an_invalid_file_value_raises_config_error(_isolated_config_dir: Path) -
 
 def test_a_malformed_toml_file_raises_config_error(_isolated_config_dir: Path) -> None:
     """A hand-edited file can have a syntax error, not just a bad value -
-    `config create` writes a file expecting it to be edited by hand."""
+    `config init` writes a file expecting it to be edited by hand."""
     _isolated_config_dir.mkdir(parents=True)
     (_isolated_config_dir / "config.toml").write_text(
         '[embedding\nbinding = "ollama"\n', encoding="utf-8"
@@ -267,7 +267,7 @@ def test_create_writes_every_known_key(_isolated_config_dir: Path) -> None:
 
 def test_create_writes_values_equal_to_the_defaults(_isolated_config_dir: Path) -> None:
     """The generated file must be a no-op: loading it has to produce exactly
-    what the built-in defaults produce, or `config create` would change
+    what the built-in defaults produce, or `config init` would change
     boepie's behaviour just by existing."""
     before = settings.load().model_dump()
 

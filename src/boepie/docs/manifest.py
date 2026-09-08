@@ -65,7 +65,7 @@ def load_default_manifest() -> list[DocsProject]:
 
 
 def load_manifest(docs_dir: Path) -> list[DocsProject]:
-    """Every docs project `corpus fetch` reconciles against.
+    """Every docs project `corpus sync` reconciles against.
 
     Mirrors `boepie.literature.manifest.load_manifest`: one packaged source,
     with the directory argument retained so the two reconcilers share a

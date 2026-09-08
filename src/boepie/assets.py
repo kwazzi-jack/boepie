@@ -60,12 +60,12 @@ def context_content_dir() -> Path:
 
 
 def literature_manifest_path() -> Path:
-    """The arXiv papers `corpus fetch --collection literature` reconciles against."""
+    """The arXiv papers `corpus sync --collection literature` reconciles against."""
     return _packaged_path("boepie.literature", "default_manifest.json")
 
 
 def docs_manifest_path() -> Path:
-    """The documentation sites `corpus fetch --collection docs` reconciles against."""
+    """The documentation sites `corpus sync --collection docs` reconciles against."""
     return _packaged_path("boepie.docs", "default_manifest.json")
 
 

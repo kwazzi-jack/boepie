@@ -123,7 +123,7 @@ class AddOutcome:
     notice: str | None = None
     # Where the document actually landed, when that is not the collection the
     # command named. The review buffer can move a paper to notes, and a
-    # "next: index build --collection literature" after that would name the
+    # "next: corpus index --collection literature" after that would name the
     # one collection nothing was written to.
     collection: str | None = None
 
@@ -959,7 +959,7 @@ def add_literature(
 
 # When arXiv's API was last called from this process. A folder of fifty PDFs
 # is fifty metadata lookups, and firing those back to back is how an IP gets
-# throttled - `corpus fetch` has always spaced its requests (see
+# throttled - `corpus sync` has always spaced its requests (see
 # `corpus.reconcile`), and `add` now does the same. Module-level because the
 # thing being rate-limited is the process, not any one batch.
 _last_arxiv_call = 0.0
@@ -1528,7 +1528,9 @@ def add_docs(
                 if on_page is not None:
                     on_page(page.docname)
 
-        detail = f"{added} page(s)" + (f", {failed} failed" if failed else "")
+        detail = f"{added} {'page' if added == 1 else 'pages'}" + (
+            f", {failed} failed" if failed else ""
+        )
         outcomes.append(
             AddOutcome(
                 identifier=identifier,

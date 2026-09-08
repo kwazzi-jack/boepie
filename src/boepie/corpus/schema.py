@@ -3,7 +3,7 @@
 
 One base model (`CorpusDocument`) holds what is true of any document in any
 collection: its surrogate `id`, its `title`, the `managed_by` guard that
-decides whether `corpus fetch` may touch it, and a nested `source` block
+decides whether `corpus sync` may touch it, and a nested `source` block
 recording where the bytes came from and how they were converted. Each
 collection extends that base with exactly one namespaced block of its own -
 `bib` for literature, `docs` for documentation pages, nothing at all for
@@ -42,7 +42,7 @@ type SourceFormat = Literal[
     "pdf", "docx", "pptx", "xlsx", "html", "markdown", "text", "code"
 ]
 
-# Who owns a document: whether `corpus fetch` may refetch or delete it.
+# Who owns a document: whether `corpus sync` may refetch or delete it.
 # `boepie` documents are reconciled against a packaged manifest; `user`
 # documents are never touched by any reconciler at any step.
 type ManagedBy = Literal["boepie", "user"]
@@ -179,7 +179,7 @@ def literature_blocks(
     """The `bib:` block for one paper, with empty fields omitted.
 
     Shared by `corpus.add` and `corpus.reconcile` so a paper you add and the
-    same paper `corpus fetch` pulls from the packaged manifest land in
+    same paper `corpus sync` pulls from the packaged manifest land in
     identical shape - the two used to build their frontmatter independently,
     and fetch's copy was left behind on the flat pre-`bib:` layout.
     """

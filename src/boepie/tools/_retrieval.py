@@ -106,7 +106,7 @@ VIEWS: dict[str, CollectionView] = {
         source_root=LITERATURE_DIR.name,
         keep_source_root=False,
         read_handles=True,
-        missing_index_fix="'boepie sync' or 'boepie index build --collection literature'",
+        missing_index_fix="`boepie sync` or `boepie corpus index --collection literature`",
         search_tool="search_literature",
     ),
     "docs": CollectionView(
@@ -114,7 +114,7 @@ VIEWS: dict[str, CollectionView] = {
         source_root=DOCS_DIR.name,
         keep_source_root=False,
         read_handles=True,
-        missing_index_fix="'boepie sync' or 'boepie index build --collection docs'",
+        missing_index_fix="`boepie sync` or `boepie corpus index --collection docs`",
         search_tool="search_docs",
         # A docs page carries a real `title` in its frontmatter and a
         # surrogate id that means nothing to a reader, so it titles hits the
@@ -128,7 +128,7 @@ VIEWS: dict[str, CollectionView] = {
         source_root=".boepie",
         keep_source_root=True,
         read_handles=False,  # no read_context tool: the source line is the handle
-        missing_index_fix="'boepie context apply'",
+        missing_index_fix="`boepie context index`",
         search_tool="search_context",
     ),
     "notes": CollectionView(
@@ -136,7 +136,7 @@ VIEWS: dict[str, CollectionView] = {
         source_root=NOTES_DIR.name,
         keep_source_root=False,
         read_handles=True,
-        missing_index_fix="'boepie index build --collection notes'",
+        missing_index_fix="`boepie corpus index --collection notes`",
         search_tool="search_notes",
     ),
 }
@@ -169,7 +169,9 @@ def snippet_text(text: str, snippet: Snippet) -> str | None:
     return collapsed[:SHORT_SNIPPET_CHARS].rstrip() + " ..."
 
 
-def relative_source(source_path: str, root_name: str, *, keep_root: bool = False) -> str:
+def relative_source(
+    source_path: str, root_name: str, *, keep_root: bool = False
+) -> str:
     """Cut an indexed chunk's absolute ``source_path`` down to a relative one.
 
     An index is built on one machine and queried on another, so the recorded
@@ -404,8 +406,14 @@ async def search_with_lexical_fallback(
     """
     try:
         results = await search(
-            question, collection=collection, top_k=top_k, filters=filters, mode=mode,
-            index_root=index_root, embedding=embedding, index_id=index_id,
+            question,
+            collection=collection,
+            top_k=top_k,
+            filters=filters,
+            mode=mode,
+            index_root=index_root,
+            embedding=embedding,
+            index_id=index_id,
         )
     except FileNotFoundError:
         return SearchOutcome(
@@ -424,8 +432,14 @@ async def search_with_lexical_fallback(
             )
         try:
             results = await search(
-                question, collection=collection, top_k=top_k, filters=filters, mode="bm25",
-                index_root=index_root, embedding=embedding, index_id=index_id,
+                question,
+                collection=collection,
+                top_k=top_k,
+                filters=filters,
+                mode="bm25",
+                index_root=index_root,
+                embedding=embedding,
+                index_id=index_id,
             )
         except (FileNotFoundError, ValueError) as fallback_error:
             return SearchOutcome(error=f"Error: {one_line(fallback_error)}")
@@ -447,16 +461,24 @@ def with_note(payload: str, note: str | None) -> str:
 class ReadRequest(BaseModel):
     """One span to expand. Shared by ``read_literature`` and ``read_docs``."""
 
-    document_id: str = Field(description="The document_id from a search hit's 'read:' line.")
+    document_id: str = Field(
+        description="The document_id from a search hit's 'read:' line."
+    )
     chunk_index: int | None = Field(
         default=None,
         description="The chunk_index from a search hit to centre on. Omit for the whole document.",
     )
     before: int = Field(
-        default=1, ge=0, le=20, description="Neighbouring chunks to include before the anchor."
+        default=1,
+        ge=0,
+        le=20,
+        description="Neighbouring chunks to include before the anchor.",
     )
     after: int = Field(
-        default=1, ge=0, le=20, description="Neighbouring chunks to include after the anchor."
+        default=1,
+        ge=0,
+        le=20,
+        description="Neighbouring chunks to include after the anchor.",
     )
 
 
@@ -483,8 +505,10 @@ async def read_spans(
     """
     try:
         handle = await get_or_load(
-            index_root=index_root, collection=collection,
-            embedding=embedding, index_id=index_id,
+            index_root=index_root,
+            collection=collection,
+            embedding=embedding,
+            index_id=index_id,
         )
     except FileNotFoundError:
         return f"Error: no '{collection}' index found. Run {missing_index_fix}."
@@ -511,7 +535,9 @@ async def read_spans(
             )
             continue
         blocks.append(
-            format_span(span, source_root=source_root, keep_source_root=keep_source_root)
+            format_span(
+                span, source_root=source_root, keep_source_root=keep_source_root
+            )
         )
 
     return SPAN_SEPARATOR.join(blocks)

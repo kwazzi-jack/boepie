@@ -107,7 +107,7 @@ async def test_search_notes_no_index_names_the_build_command(
         await boepie_client.call_tool("search_notes", {"input": {"question": "anything"}})
     )
     assert text.startswith("Error:")
-    assert "boepie index build --collection notes" in text
+    assert "boepie corpus index --collection notes" in text
 
 
 async def test_read_notes_expands_a_hit_into_a_provenance_header(

@@ -11,30 +11,24 @@ import os
 import shutil
 import sys
 import textwrap
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
 
 import httpx
 import tomlkit
+
 # rich_click is a drop-in for click that renders --help through rich, so every
 # `click.option`/`click.argument` below is the real click decorator and only
 # the help formatting changes. Imported under the name `click` because that is
 # what it is: swapping the alias back is the whole uninstall.
 import rich_click as click
-from rich.progress import (
-    BarColumn,
-    MofNCompleteColumn,
-    Progress,
-    TextColumn,
-    TimeElapsedColumn,
-    TimeRemainingColumn,
-)
 from rich.tree import Tree
 
 from boepie import __version__, settings
 from boepie import _display as display
-from boepie._display import CliError, console
+from boepie._display import Cancelled, CliError, PlainMessage, console
 from boepie.config import (
     CORPUS_EXTRA_FILE_TYPES,
     CORPUS_KEEP_ORIGINAL,
@@ -91,6 +85,7 @@ from boepie.mcp_config import (
     McpConfigError,
     TargetResult,
     apply_target,
+    inspect_target,
     manual_definition,
     server_command,
     target_named,
@@ -100,12 +95,12 @@ from boepie.rag import (
     DocsLoader,
     EmptyCollectionError,
     StaleIndexError,
+    index_command,
     index_freshness,
     LiteratureLoader,
     ModelBinding,
     NotesLoader,
     build,
-    default_embedding_binding,
     embedding_options,
     search,
 )
@@ -122,6 +117,7 @@ from boepie.tools._retrieval import (
     with_note,
 )
 
+
 class _PlainErrorFormatter(click.RichHelpFormatter):
     """rich-click's help formatter, with boepie's own aborts left plain.
 
@@ -135,7 +131,9 @@ class _PlainErrorFormatter(click.RichHelpFormatter):
     """
 
     def write_error(self, error: click.ClickException) -> None:
-        if isinstance(error, CliError):
+        # Every abort boepie words itself, not `CliError` alone: `Cancelled`
+        # was written later and got the panel back until it shared a base.
+        if isinstance(error, PlainMessage):
             error.show()
             return
         super().write_error(error)
@@ -181,9 +179,12 @@ def _loader_for(collection: str):
     current value is read at call time.
     """
     directories = {
-        "literature": LITERATURE_DIR, "docs": DOCS_DIR, "notes": NOTES_DIR,
+        "literature": LITERATURE_DIR,
+        "docs": DOCS_DIR,
+        "notes": NOTES_DIR,
     }
     return _LOADERS[collection](directories[collection])
+
 
 # Threshold for hint search results, on the *raw BM25* score of the top hit
 # (hint is BM25-only; see `_hint_search`). Placeholder value - the dummy
@@ -341,7 +342,10 @@ def _run(coro):
     try:
         return asyncio.run(coro)
     except KeyboardInterrupt:
-        raise CliError("cancelled.") from None
+        # `Cancelled`, not `CliError`: a stopped command is not a failed one,
+        # and the composites that carry on past a failure must not carry on
+        # past this.
+        raise Cancelled("stopped before it finished.") from None
     except (EmptyCollectionError, StaleIndexError):
         # Both are ValueError subclasses that a caller sweeping several
         # collections needs to tell apart from an ordinary failure - one to
@@ -355,8 +359,25 @@ def _run(coro):
 @click.group()
 @click.rich_config(help_config=_HELP_CONFIG)
 @click.version_option(version=__version__, prog_name="boepie")
-def cli() -> None:
+@click.option(
+    "-q",
+    "--quiet",
+    is_flag=True,
+    help="Print errors only. Suppresses the report, never a problem.",
+)
+@click.option(
+    "--no-progress",
+    is_flag=True,
+    help="Never draw a progress bar, even on a terminal.",
+)
+def cli(quiet: bool, no_progress: bool) -> None:
     """Boepie - MCP server for AI-assisted stimela pipeline creation."""
+    # Both options sit on the group rather than on each command because they
+    # describe how boepie talks, not what it does: someone who wants quiet
+    # wants it everywhere, and having to remember which subcommands accept it
+    # would make it useless. Applied to `_display` once, read by every
+    # primitive from then on.
+    display.set_verbosity(quiet=quiet, progress=not no_progress)
 
 
 @cli.command()
@@ -368,319 +389,152 @@ def serve() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Index management: build, status, list
+# Indexing: a verb on the noun that owns the index, not a noun of its own
 # ---------------------------------------------------------------------------
-
-
-@cli.group()
-def index() -> None:
-    """Manage search indices (build, status, list)."""
-
-
-@index.command("build")
-@click.option(
-    "--collection",
-    "collections",
-    default=_ALL,
-    show_default=True,
-    type=CollectionList(_BUILD_COLLECTIONS),
-    help="Comma-separated collections to build, or 'all'.",
-)
-@embedding_options
-@click.option(
-    "--embedding-concurrency",
-    default=None,
-    type=int,
-    help="Max concurrent embedding requests (default: 4). Lower this if you're hitting API rate limits.",
-)
-@click.option(
-    "--index-name",
-    default=None,
-    help="Override the auto-derived index id (default: <binding>-<model>).",
-)
-@click.option(
-    "-v",
-    "--verbose",
-    is_flag=True,
-    help="Show per-batch progress logging (useful for slow builds).",
-)
-def index_build(
-    collections: tuple[str, ...],
-    resolve_embedding,
-    embedding_concurrency: int | None,
-    index_name: str | None,
-    verbose: bool,
-) -> None:
-    """Build the search index for one or more collections.
-
-    With no --collection this builds every collection that has something to
-    index, reporting the ones it skipped rather than failing on them: an
-    empty corpus is a normal state, not an error, when you did not name it.
-    Naming a collection explicitly does make an empty one an error - you
-    asked for that index specifically.
-
-    Needs nothing running by default: fastembed runs a small ONNX model
-    locally on CPU (one-time model download, then fully offline). Use
-    --embedding-binding=ollama for a local Ollama daemon, or
-    --embedding-binding=openai for an OpenAI API key or a local
-    OpenAI-compatible server (vLLM/SGLang/TGI) via --embedding-host=<url>.
-    """
-    _set_verbosity(verbose)
-    if index_name is not None and len(collections) > 1:
-        raise CliError(
-            "--index-name names one index, so it cannot be combined with "
-            "several collections. Build them one at a time, or drop the flag."
-        )
-    # An explicit single collection is a request for that index; anything
-    # broader is a sweep, where "nothing to index" is a skip, not a failure.
-    sweeping = len(collections) > 1
-
-    built = 0
-    for collection in collections:
-        try:
-            _build_one(
-                collection,
-                resolve_embedding=resolve_embedding,
-                embedding_concurrency=embedding_concurrency,
-                index_name=index_name,
-            )
-        except EmptyCollectionError as error:
-            if not sweeping:
-                raise CliError(str(error)) from error
-            display.muted(f"nothing to index in '{collection}'", indent="  ")
-            continue
-        except _NoBundleError:
-            if not sweeping:
-                raise _no_bundle_error() from None
-            display.muted("no .boepie/ bundle here, skipping 'context'", indent="  ")
-            continue
-        built += 1
-
-    if sweeping:
-        display.heading(
-            f"of {len(collections)} collection(s) indexed.", lead=f"\n{built}"
-        )
+#
+# The two index families share no storage, no scope and no retrieval stack:
+# a corpus collection indexes to `INDEX_DIR/<collection>/<id>/`, machine-
+# global and hybrid BM25+dense; the context bundle indexes to
+# `<bundle>/.index/context/bm25/`, per-project and BM25-only. Grouping them
+# under one `index` noun put a command boundary where there is no boundary in
+# the code, and `index status` proved it by enumerating INDEX_DIR alone - the
+# noun that claimed to own every index could not see one of them.
+#
+# So indexing is a verb each owner carries. `boepie corpus index -l` names its
+# scope once, in the same spelling `corpus sync -l` uses, instead of repeating
+# it as `--collection literature` under a different noun.
 
 
 class _NoBundleError(Exception):
     """`context` was selected but no `.boepie/` bundle governs the cwd."""
 
 
-def _build_one(
+# How each freshness state reads, and how loudly. Only "stale" is a fault;
+# the other three are facts about what can be checked, so they stay dim.
+#
+# Every one of these names a *condition of the index*, because that is the
+# question `status` answers. "in step with its corpus" said the same thing
+# in a shape that reads as a relationship between two things rather than as
+# a verdict on one, so a reader had to work out which of the two was wrong.
+# `current` needs no unpacking.
+_FRESHNESS_WORDING: dict[str, str] = {
+    "in step": "current",
+    "corpus absent": "unverifiable - its corpus is not on this machine",
+    "unrecorded": "unverifiable - built before boepie recorded what it read",
+}
+
+
+def _index_rows(collection: str, index_root: Path) -> bool:
+    """The `index:`/`embedding:` rows for one collection, under its heading.
+
+    Printed by `corpus status` and `context status` rather than by an
+    `index status` of its own: an index belongs to the thing it was built
+    from, so its state is one more fact about that thing. Returns whether
+    anything is wrong, so `--check-only` can exit on it.
+
+    The failure this reports used to be undiagnosable: an index built over an
+    older corpus answers queries perfectly happily, with plausible scores,
+    pointing at text that has since changed. One row is what turns that into
+    something you can see before it misleads you.
+    """
+    latest_path = index_root / collection / "latest.json"
+    if not latest_path.is_file():
+        display.warning("not built yet", lead=_status_label("index"), indent="  ")
+        display.next_step(f"boepie {index_command(collection)}")
+        return True
+
+    try:
+        active_id = json.loads(latest_path.read_text(encoding="utf-8"))["index_id"]
+        manifest_path = index_root / collection / str(active_id) / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, KeyError, TypeError):
+        display.warning(
+            "unreadable - rebuild it", lead=_status_label("index"), indent="  "
+        )
+        return True
+
+    freshness = index_freshness(manifest.get("built_from"), collection)
+    if freshness.state == "stale":
+        counts = ", ".join(
+            part
+            for part in (
+                f"{freshness.changed} changed" if freshness.changed else "",
+                f"{freshness.gone} gone" if freshness.gone else "",
+            )
+            if part
+        )
+        display.warning(
+            f"stale - {counts} of {freshness.document_count} documents",
+            lead=_status_label("index"),
+            indent="  ",
+        )
+        display.next_step(f"boepie {index_command(collection)}")
+        wrong = True
+    else:
+        display.muted(
+            _FRESHNESS_WORDING[freshness.state]
+            + (
+                f" ({freshness.document_count} documents)"
+                if freshness.state == "in step"
+                else ""
+            ),
+            lead=_status_label("index"),
+            indent="  ",
+        )
+        wrong = False
+
+    kind = manifest.get("embedding_kind")
+    display.muted(
+        f"{kind}:{manifest.get('embedding_model')} ({active_id})"
+        if kind
+        else f"none - BM25 only ({active_id})",
+        lead=_status_label("embedding"),
+        indent="  ",
+    )
+    return wrong
+
+
+def _build_corpus_index(
     collection: str,
     *,
     resolve_embedding,
     embedding_concurrency: int | None,
     index_name: str | None,
 ) -> None:
-    """Build one collection's index, with a progress bar over its chunks."""
-    if collection == _CONTEXT_COLLECTION:
-        # Per-project and BM25-only: its index belongs inside the bundle it
-        # was built from, not the machine-global store.
-        bundle_dir = find_bundle()
-        if bundle_dir is None:
-            raise _NoBundleError
-        _build_context_index(bundle_dir)
-        return
-
+    """Build one corpus collection's index, with a progress bar over its chunks."""
     loader = _loader_for(collection)
     embedding = resolve_embedding(max_async=embedding_concurrency)
 
-    with Progress(
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        MofNCompleteColumn(),
-        TimeElapsedColumn(),
-        TimeRemainingColumn(),
-        console=console,
-    ) as progress:
-        # total is unknown until build() finishes chunking every document and
-        # reports the real count via its first on_progress(0, total) call -
-        # until then this renders as an indeterminate spinner.
-        task_id = progress.add_task(
-            f"Indexing '{collection}' ({embedding.kind}:{embedding.model} embeddings)",
-            total=None,
-        )
-
-        def on_progress(done: int, total: int) -> None:
-            progress.update(task_id, completed=done, total=total)
-
+    # total is unknown until build() finishes chunking every document and
+    # reports the real count via its first on_progress(0, total) call - until
+    # then the bar renders as an indeterminate spinner.
+    started = time.monotonic()
+    with display.progress_bar(f"Indexing '{collection}'", total=None) as advance:
         manifest = _run(
             build(
                 loader,
                 index_root=INDEX_DIR,
                 embedding=embedding,
                 index_id=index_name,
-                on_progress=on_progress,
+                on_progress=lambda done, total: advance(done, total),
             )
         )
-    display.success(
-        f"{manifest.count} chunks into '{collection}/{manifest.index_id}' "
-        f"(embedding={manifest.embedding_kind}:{manifest.embedding_model}).",
-        lead="Indexed",
+    display.operation(
+        "Indexed",
+        f"{_plural(manifest.count, 'chunk')} into {collection}/{manifest.index_id}",
+        elapsed=time.monotonic() - started,
     )
-
-
-# How each freshness state reads, and how loudly. Only "stale" is a fault;
-# the other three are facts about what can be checked, so they stay dim.
-_FRESHNESS_WORDING: dict[str, str] = {
-    "in step": "in step with its corpus",
-    "corpus absent": "corpus not on this machine (nothing to check against)",
-    "unrecorded": "not recorded (built before this was tracked)",
-}
-
-
-def _report_freshness(collection: str, manifest: dict[str, Any]) -> None:
-    """Say whether an index still matches the corpus it was built over.
-
-    The failure this reports used to be undiagnosable from `status`: an index
-    built over an older corpus answers queries perfectly happily, with
-    plausible scores, pointing at text that has since changed. One line here
-    is what turns that into a thing you can see before it misleads you.
-    """
-    freshness = index_freshness(manifest.get("built_from"), collection)
-    if freshness.state != "stale":
-        display.muted(
-            _FRESHNESS_WORDING[freshness.state],
-            lead=_status_label("corpus"),
-            indent="  ",
-        )
-        return
-
-    counts = ", ".join(
-        part
-        for part in (
-            f"{freshness.changed} changed" if freshness.changed else "",
-            f"{freshness.gone} gone" if freshness.gone else "",
-        )
-        if part
-    )
-    display.warning(
-        f"stale - of {freshness.document_count} document(s), {counts}",
-        lead=_status_label("corpus"),
-        indent="  ",
-    )
-    # The fix goes on its own line in the value column rather than trailing
-    # the row: rich would break `boepie index build --collection notes` across
-    # a line end, which is the exact wrap CliError exists to avoid elsewhere.
-    display.next_step(
-        f"boepie index build --collection {collection}",
-        indent=_STATUS_VALUE_INDENT,
-    )
-
-
-@index.command("status")
-def index_status() -> None:
-    """Report the status of all indices under the index directory.
-
-    For each collection, shows the active index id and whether its embedding
-    config matches the active embedding environment.
-    """
-    if not INDEX_DIR.exists():
-        display.warning(f"No index directory yet at {INDEX_DIR}")
-        return
-
-    collections_with_indices: dict[str, list[str]] = {}
-    for collection_dir in INDEX_DIR.iterdir():
-        if not collection_dir.is_dir():
-            continue
-        index_ids: list[str] = []
-        for item in collection_dir.iterdir():
-            if item.is_dir() and item.name != ".":
-                index_ids.append(item.name)
-        if index_ids:
-            collections_with_indices[collection_dir.name] = sorted(index_ids)
-
-    if not collections_with_indices:
-        display.warning("No indices built or fetched yet.")
-        return
-
-    for position, (collection_name, index_ids) in enumerate(
-        sorted(collections_with_indices.items())
-    ):
-        latest_link = INDEX_DIR / collection_name / "latest.json"
-        if latest_link.exists():
-            latest_data = json.loads(latest_link.read_text(encoding="utf-8"))
-            active_id = latest_data.get("index_id", "unknown")
-        else:
-            active_id = "none"
-
-        if position:
-            console.print()
-        console.print(
-            display.collection_root(collection_name, INDEX_DIR / collection_name),
-            soft_wrap=True,
-        )
-
-        # An index with nothing pointing at it cannot be searched, so "none"
-        # is the one value here that is a problem rather than a fact.
-        report = display.muted if active_id != "none" else display.warning
-        report(active_id, lead=_status_label("active"), indent="  ")
-
-        if active_id != "none" and active_id in index_ids:
-            manifest_path = INDEX_DIR / collection_name / active_id / "manifest.json"
-            if manifest_path.exists():
-                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-                embedding_kind = manifest.get("embedding_kind")
-                embedding_model = manifest.get("embedding_model")
-                display.muted(
-                    f"{embedding_kind}:{embedding_model}",
-                    lead=_status_label("embedding"),
-                    indent="  ",
-                )
-                _report_freshness(collection_name, manifest)
-
-        # Only what you could switch *to*: repeating the active id under
-        # "available" is the one-element case saying nothing twice.
-        alternatives = [index_id for index_id in index_ids if index_id != active_id]
-        if alternatives:
-            _status_list("others", alternatives)
-
-
-@index.command("list")
-def index_list() -> None:
-    """Enumerate every index built on this machine.
-
-    Shows collection names and their available index ids.
-    """
-    if not INDEX_DIR.exists():
-        display.warning(f"No index directory yet at {INDEX_DIR}")
-        return
-
-    listed: dict[str, list[str]] = {}
-    for collection_dir in sorted(INDEX_DIR.iterdir()):
-        if not collection_dir.is_dir():
-            continue
-        index_ids = sorted(
-            item.name
-            for item in collection_dir.iterdir()
-            if item.is_dir() and item.name not in (".", "..")
-        )
-        if index_ids:
-            listed[collection_dir.name] = index_ids
-
-    if not listed:
-        display.warning("No indices found.")
-        return
-
-    # Aligned on the longest collection name rather than on the fixed status
-    # column: here the label is the name, not one of a known set of rows.
-    label_width = max(len(name) for name in listed) + 2
-    for collection_name, index_ids in listed.items():
-        display.muted(
-            ", ".join(index_ids), lead=f"{collection_name}:".ljust(label_width - 1)
-        )
 
 
 # ---------------------------------------------------------------------------
-# Corpus: add, fetch, status, list - literature/docs/notes, built on this
+# Corpus: init, sync, add, status, list - literature/docs/notes, built on this
 # machine, unified around boepie.corpus's shared layout (see boepie.corpus
 # for the on-disk shape: directory-as-group, full-title filenames, a
 # surrogate `id`, `managed_by: boepie | user` provenance).
 # ---------------------------------------------------------------------------
 #
 # No literature Markdown or built index is ever published by boepie (see
-# boepie.literature.fetch): `corpus fetch --collection literature` pulls each
+# boepie.literature.fetch): `corpus sync --collection literature` pulls each
 # manifest paper's HTML straight from arxiv.org/ar5iv.labs.arxiv.org and
 # converts it locally, so the only thing boepie itself ships is the small
 # bibliographic manifest. Papers with no arXiv presence (pre-arXiv-era, or
@@ -700,9 +554,21 @@ def _corpus_collection_dir(collection: str) -> Path:
     ]
 
 
+def _corpus_population_command(collection: str) -> str:
+    """The command that puts documents into `collection`.
+
+    `notes` has no packaged manifest and so no `fetch` leg - every note is
+    one you added - which is why this is a lookup rather than one string with
+    the collection interpolated into it.
+    """
+    if collection == "notes":
+        return "boepie corpus add -n <file-or-url>"
+    return f"boepie corpus sync --collection {collection}"
+
+
 @cli.group()
 def corpus() -> None:
-    """Manage the literature/docs/notes corpora (add, fetch, status, list)."""
+    """Manage the literature/docs/notes corpora (init, sync, add, status, list)."""
 
 
 # `add` writes documents immediately and always as `managed_by: user`; it
@@ -732,7 +598,7 @@ def _add_options(function):
         "--keep-original/--no-keep-original",
         default=None,
         help="Retain the source bytes alongside the Markdown "
-        f"(default: corpus.keep_original).",
+        "(default: corpus.keep_original).",
     )(function)
     return function
 
@@ -760,7 +626,7 @@ def _converting_with_mineru(documents: int, number: int, total: int) -> None:
     """
     run = f" (run {number} of {total})" if total > 1 else ""
     display.info(
-        f"{documents} document(s) with MinerU{run} - this takes a few minutes",
+        f"{_plural(documents, 'document')} with MinerU{run} - this takes a few minutes",
         lead="converting",
     )
 
@@ -857,7 +723,7 @@ def _report_add(collection: str, outcomes: list[AddOutcome]) -> None:
     """One line per identifier, then a single summary and next step.
 
     Printed per batch rather than per item: adding is meant to be staged like
-    commits, several at a time, with one index build at the end.
+    commits, several at a time, with one corpus index at the end.
     """
     added = [outcome for outcome in outcomes if outcome.status == "added"]
     duplicates = [outcome for outcome in outcomes if outcome.status == "duplicate"]
@@ -868,41 +734,43 @@ def _report_add(collection: str, outcomes: list[AddOutcome]) -> None:
         if outcome.status == "added":
             via = f" via {outcome.via}" if outcome.via else ""
             detail = f" ({outcome.detail})" if outcome.detail else ""
-            display.success(
+            display.detail(
+                "+",
                 (
                     f"{outcome.title} (id={outcome.document_id}{via}){detail}"
                     if outcome.document_id
                     else f"{outcome.title}{detail}"
                 ),
-                lead="added",
             )
             if outcome.notice and CORPUS_WARN_ON_DOTFILE_TITLE:
-                display.warning(
+                display.note(
                     f"{outcome.notice}. Pass --title to control this, or set "
-                    f"corpus.warn_on_dotfile_title=false.",
-                    lead="note:",
-                    indent="  ",
+                    f"corpus.warn_on_dotfile_title=false."
                 )
         elif outcome.status == "duplicate":
-            display.warning(
+            display.detail(
+                "=",
                 f"{outcome.identifier} - {outcome.detail} (id={outcome.document_id})",
-                lead="duplicate",
             )
         elif outcome.status == "skipped":
             # Quieter than a duplicate: nothing is wrong, and a folder walk can
             # produce a great many of these at once.
-            display.muted(f"{outcome.identifier} - {outcome.detail}", lead="skipped")
+            display.detail("=", f"{outcome.identifier} - {outcome.detail}")
         else:
-            display.error(f"{outcome.identifier} - {outcome.detail}", lead="failed")
+            display.note(f"{outcome.identifier} - {outcome.detail}")
 
-    # Skips are counted only when there are any - on a hand-typed batch the
-    # count is always zero and would just be one more number to read past.
-    tail = f", {len(skipped)} skipped" if skipped else ""
-    display.heading(
-        f"{len(duplicates)} already present, {len(failures)} failed{tail}.",
-        lead=f"{len(added)} added,",
-        indent="\n",
-    )
+    # The summary comes last here, unlike everywhere else, because the detail
+    # lines above it are the per-document record and this counts them. Only
+    # the outcomes that occurred are named: on a hand-typed batch the other
+    # three counts are always zero and would be three numbers to read past.
+    counted = [
+        f"{len(added)} added" if added else "",
+        f"{len(duplicates)} already present" if duplicates else "",
+        f"{len(skipped)} skipped" if skipped else "",
+        f"{len(failures)} failed" if failures else "",
+    ]
+    summary = ", ".join(part for part in counted if part) or "nothing to do"
+    display.operation("Added", f"{summary} in {collection}")
     if added:
         # The review buffer can send a paper to notes, so the collections
         # named here are the ones actually written to, not the one the
@@ -910,7 +778,7 @@ def _report_add(collection: str, outcomes: list[AddOutcome]) -> None:
         landed = {outcome.collection or collection for outcome in added}
         written = [name for name in _CORPUS_COLLECTIONS if name in landed]
         display.next_step(
-            f"boepie index build --collection {','.join(written)}",
+            f"boepie corpus index --collection {','.join(written)}",
             note="(once you have finished adding)",
         )
     # Failures only. A skip is a deliberate decision not to take something, so
@@ -990,8 +858,8 @@ def corpus_add(
     """Add documents to a corpus collection, immediately.
 
     Everything `add` writes is yours (`managed_by: user`) and is never
-    touched by `corpus fetch`, which only reconciles boepie's own packaged
-    manifest. Several identifiers at once; run `boepie index build` once when
+    touched by `corpus sync`, which only reconciles boepie's own packaged
+    manifest. Several identifiers at once; run `boepie corpus index` once when
     you have finished adding.
 
     \b
@@ -1081,7 +949,7 @@ def corpus_remove(collection: str, document_ids: tuple[str, ...], yes: bool) -> 
 
     The only way out of a corpus: with no user manifest to edit, removing an
     entry and re-running `fetch` is no longer a deletion path. A
-    `managed_by: boepie` document can be removed too, but `corpus fetch` will
+    `managed_by: boepie` document can be removed too, but `corpus sync` will
     restore it while its manifest entry stands.
     """
     collection_dir = _corpus_collection_dir(collection)
@@ -1105,7 +973,7 @@ def corpus_remove(collection: str, document_ids: tuple[str, ...], yes: bool) -> 
         title = document.frontmatter.get("title", document.id)
         display.info(f"{title} (id={document.id})", indent="  ")
     if not yes:
-        click.confirm(f"Delete {len(targets)} document(s)?", abort=True)
+        click.confirm(f"Delete {_plural(len(targets), 'document')}?", abort=True)
 
     for document in targets:
         if document.wrapper_dir is not None:
@@ -1113,11 +981,86 @@ def corpus_remove(collection: str, document_ids: tuple[str, ...], yes: bool) -> 
         else:
             document.md_path.unlink()
 
-    display.success(f"{len(targets)} document(s).", lead="Removed")
-    display.next_step(f"boepie index build --collection {collection}")
+    display.operation("Removed", f"{len(targets)} documents from {collection}")
+    display.next_step(f"boepie corpus index --collection {collection}")
 
 
-@corpus.command("fetch")
+@corpus.command("init")
+@click.option(
+    "--collection",
+    "collections",
+    default=_ALL,
+    show_default=True,
+    type=CollectionList(_CORPUS_COLLECTIONS),
+    help="Comma-separated collections to create, or 'all'.",
+)
+def corpus_init(collections: tuple[str, ...]) -> None:
+    """Create this machine's corpus directories, empty.
+
+    The scaffold half of the corpus: fast, offline, and idempotent, with
+    nothing fetched. `corpus sync` fills them.
+
+    **It exists so that nothing else has to create them by accident.** Until
+    now the only thing that made a corpus directory was writing the first
+    document into it (`corpus.document`'s `mkdir(parents=True)`), so a corpus
+    came into being as a side effect of a write. A mistyped
+    `BOEPIE_LITERATURE_DIR` silently produced a second corpus at the wrong
+    path instead of an error, and every command had to answer "is there a
+    corpus here" for itself.
+
+    Machine-global, unlike `context init`: these three directories are shared
+    by every workspace, so the second project on a machine finds them already
+    made and is told so rather than being given its own.
+    """
+    started = time.monotonic()
+    created: list[str] = []
+    present = 0
+    for collection in collections:
+        collection_dir = _corpus_collection_dir(collection)
+        if collection_dir.is_dir():
+            present += 1
+            continue
+        collection_dir.mkdir(parents=True, exist_ok=True)
+        created.append(str(collection_dir))
+
+    # One operation line and the paths beneath it, rather than three lines
+    # each carrying a long absolute path. The three are normally siblings
+    # under one data root, so repeating it would be most of the output.
+    if created:
+        summary = _plural(len(created), "corpus directory", "corpus directories")
+        if present:
+            summary += f", {present} already there"
+        display.operation("Created", summary, elapsed=time.monotonic() - started)
+        display.details("+", created)
+    else:
+        display.operation(
+            "Checked",
+            _plural(present, "corpus directory", "corpus directories"),
+            elapsed=time.monotonic() - started,
+            style="muted",
+        )
+
+
+def _require_corpus(collections: tuple[str, ...]) -> None:
+    """Refuse to work against a corpus this machine has not created.
+
+    The one readiness check, so every command fails the same way instead of
+    quietly scaffolding. `sync` used to create the `.boepie/` bundle itself
+    when there was none, which made a fresh workspace look like a working one
+    - the command reported success against state it had just invented.
+    """
+    absent = [
+        name for name in collections if not _corpus_collection_dir(name).is_dir()
+    ]
+    if not absent:
+        return
+    raise CliError(
+        f"no corpus on this machine for {', '.join(absent)}. "
+        f"Run {display.command('boepie init')} first."
+    )
+
+
+@corpus.command("sync")
 @click.option(
     "--collection",
     "collections",
@@ -1141,7 +1084,7 @@ def corpus_remove(collection: str, document_ids: tuple[str, ...], yes: bool) -> 
     help="Seconds between fetches (default: a collection-specific politeness delay).",
 )
 @click.option("-v", "--verbose", is_flag=True, help="Show progress per item.")
-def corpus_fetch(
+def corpus_sync(
     collections: tuple[str, ...],
     force_targets: tuple[str, ...],
     delay: float | None,
@@ -1154,9 +1097,10 @@ def corpus_fetch(
     Runs entirely on this machine (arXiv HTML for literature, each site's own
     pages for docs) - no marker/OCR pass, nothing downloaded from a boepie
     release. `managed_by: user` documents are never touched. Run `boepie index
-    build --collection <collection>` afterward to index what changed.
+    sync --collection <collection>` afterward to index what changed.
     """
     _set_verbosity(verbose)
+    _require_corpus(collections)
     for collection in collections:
         _corpus_fetch_one(collection, force_targets, delay, verbose)
 
@@ -1168,12 +1112,13 @@ def _corpus_fetch_one(
         # Accepted rather than rejected as an invalid choice: "notes is not
         # one of literature, docs" says nothing about why, and the reason is
         # worth stating - notes exist only because you added them.
-        display.warning(
-            "Notes have no packaged manifest to reconcile against - every note "
-            "is one you added.",
-            lead="Nothing to fetch.",
+        display.operation(
+            "Skipped",
+            "notes - no packaged manifest to reconcile against, every note is "
+            "one you added",
+            style="muted",
         )
-        display.info("Add one with: boepie corpus add -n <file-or-url>")
+        display.next_step("boepie corpus add -n <file-or-url>")
         return
     try:
         if collection == "literature":
@@ -1183,12 +1128,13 @@ def _corpus_fetch_one(
     except ValueError as error:
         raise CliError(str(error)) from error
     except KeyboardInterrupt:
-        display.warning(
-            f"Documents already written are kept. Re-run the same command to "
-            f"carry on from where it stopped.",
-            lead="Interrupted.",
+        display.note(
+            "documents already written are kept. Re-run the same command to "
+            "carry on from where it stopped."
         )
-        raise SystemExit(130) from None
+        raise Cancelled(
+            f"stopped during the {collection} fetch."
+        ) from None
 
 
 def _corpus_fetch_literature(
@@ -1196,11 +1142,12 @@ def _corpus_fetch_literature(
 ) -> None:
     papers = load_literature_manifest(LITERATURE_DIR)
     if not papers:
-        display.warning("No papers in the literature manifest.")
+        display.note("No papers in the literature manifest.")
         return
 
+    started = time.monotonic()
     with _fetch_progress(
-        f"Fetching {len(papers)} paper(s) from arXiv", len(papers), verbose
+        f"Fetching {len(papers)} papers from arXiv", len(papers), verbose
     ) as advance:
 
         def on_progress(paper: ArxivPaper | None, result) -> None:
@@ -1208,12 +1155,12 @@ def _corpus_fetch_literature(
             if not verbose:
                 return
             if result.action == "unavailable":
-                display.warning(
-                    f"{result.citekey} (arXiv:{paper.arxiv_id if paper else '?'})",
-                    lead="unavailable",
+                display.note(
+                    f"no HTML for {result.citekey} "
+                    f"(arXiv:{paper.arxiv_id if paper else '?'})"
                 )
             else:
-                display.success(result.citekey, lead=result.action)
+                display.detail(_ACTION_MARKERS.get(result.action, "="), result.citekey)
 
         results = sync_literature(
             LITERATURE_DIR,
@@ -1223,46 +1170,46 @@ def _corpus_fetch_literature(
             on_progress=on_progress,
         )
 
-    added = sum(1 for r in results if r.action == "added")
-    refetched = sum(1 for r in results if r.action == "refetched")
+    added = [r for r in results if r.action == "added"]
+    refetched = [r for r in results if r.action == "refetched"]
     skipped = sum(1 for r in results if r.action == "skipped")
-    deleted = sum(1 for r in results if r.action == "deleted")
+    deleted = [r for r in results if r.action == "deleted"]
     unavailable = [r for r in results if r.action == "unavailable"]
     yours = [r for r in results if r.action == "yours"]
 
-    console.print(display.collection_root("literature", LITERATURE_DIR), soft_wrap=True)
-    display.success(
-        f"{added} added, {refetched} refetched, "
-        f"{skipped} skipped, {deleted} deleted",
-        lead=_status_label("fetched"),
-        indent="  ",
+    _report_fetch(
+        "papers",
+        elapsed=time.monotonic() - started,
+        added=added,
+        refetched=refetched,
+        deleted=deleted,
+        skipped=skipped,
+        verbose=verbose,
     )
     if yours:
         # Not a failure and not a skip: fetch is doing what it promises by
         # leaving these alone. Said out loud because the alternative is a
         # manifest entry that never appears in the corpus and never explains
         # itself.
-        display.muted(
-            f"{len(yours)} paper(s) in the manifest are yours and were left alone",
-            lead=_status_label("yours"),
-            indent="  ",
+        display.operation(
+            "Kept",
+            f"{len(yours)} papers that are yours, not boepie's",
+            style="muted",
         )
-        _status_items([result.citekey for result in yours])
+        display.details(
+            "=", [result.citekey for result in yours], limit=_detail_limit(verbose)
+        )
     if unavailable:
-        display.warning(
-            f"{len(unavailable)} paper(s) have no HTML rendering at arxiv.org "
-            f"or ar5iv",
-            lead=_status_label("no HTML"),
-            indent="  ",
+        display.note(
+            f"{len(unavailable)} papers have no HTML rendering at arxiv.org or ar5iv"
         )
-        _status_items([result.citekey for result in unavailable])
-        # In the value column, so it reads as part of the row above rather
-        # than as the command's own closing advice - which the Next: line is.
-        display.info(
-            "supply the PDF: boepie corpus add -l <file.pdf>",
-            indent=_STATUS_VALUE_INDENT,
+        display.details(
+            "!",
+            [result.citekey for result in unavailable],
+            limit=_detail_limit(verbose),
         )
-    display.next_step("boepie index build --collection literature", indent="  ")
+        display.hint("supply the PDF yourself with `boepie corpus add -l <file.pdf>`")
+    display.next_step("boepie corpus index --collection literature")
 
 
 def _corpus_fetch_docs(
@@ -1270,22 +1217,22 @@ def _corpus_fetch_docs(
 ) -> None:
     projects = load_docs_manifest(DOCS_DIR)
     if not projects:
-        display.warning("No projects in the docs manifest.")
+        display.note("No projects in the docs manifest.")
         return
 
+    started = time.monotonic()
     with _fetch_progress(
-        f"Fetching {len(projects)} docs project(s)", len(projects), verbose
+        f"Fetching {len(projects)} docs projects", len(projects), verbose
     ) as advance:
 
         def on_progress(project: DocsProject | None, result) -> None:
             advance()
             if not verbose:
                 return
-            display.heading(
-                f"{result.added} added, {result.refetched} refetched, "
-                f"{result.skipped} skipped, {result.deleted} deleted "
-                f"({len(result.failures)} failure(s)).",
-                lead=f"{result.project}:",
+            display.detail(
+                "+" if result.added else "=",
+                f"{result.project} - {result.added} added, {result.refetched} "
+                f"refetched, {result.skipped} unchanged, {result.deleted} deleted",
             )
 
         results = sync_docs(
@@ -1303,29 +1250,104 @@ def _corpus_fetch_docs(
     total_failures = sum(len(r.failures) for r in results)
     total_yours = sum(r.yours for r in results)
 
-    console.print(display.collection_root("docs", DOCS_DIR), soft_wrap=True)
-    display.success(
-        f"{total_added} added, {total_refetched} refetched, "
-        f"{total_skipped} skipped, {total_deleted} deleted "
-        f"across {len(results)} project(s)",
-        lead=_status_label("fetched"),
-        indent="  ",
-    )
+    # Pages, not projects: a docs result is per-project but the unit a reader
+    # counts in is pages, so the counts are summed and the projects named in
+    # the detail lines under them.
+    elapsed = time.monotonic() - started
+    changes = [
+        f"{total_added} added" if total_added else "",
+        f"{total_refetched} refetched" if total_refetched else "",
+        f"{total_deleted} deleted" if total_deleted else "",
+    ]
+    summary = ", ".join(part for part in changes if part)
+    if summary:
+        unchanged = f", {total_skipped} unchanged" if total_skipped else ""
+        display.operation(
+            "Fetched",
+            f"{summary}{unchanged} across {len(results)} docs projects",
+            elapsed=elapsed,
+        )
+        display.details(
+            "+",
+            [
+                f"{r.project} - {r.added + r.refetched} pages"
+                for r in results
+                if r.added or r.refetched
+            ],
+            limit=_detail_limit(verbose),
+        )
+    else:
+        display.operation(
+            "Checked",
+            f"{total_skipped} pages across {len(results)} docs projects, all current",
+            elapsed=elapsed,
+            style="muted",
+        )
     if total_yours:
         yours_projects = sorted(r.project for r in results if r.yours)
-        display.muted(
-            f"{total_yours} page(s) are yours and were left alone "
+        display.operation(
+            "Kept",
+            f"{total_yours} pages that are yours, not boepie's "
             f"({', '.join(yours_projects)})",
-            lead=_status_label("yours"),
-            indent="  ",
+            style="muted",
         )
     if total_failures:
-        display.warning(
-            f"{total_failures} page(s) could not be fetched",
-            lead=_status_label("failures"),
-            indent="  ",
+        display.note(f"{total_failures} pages could not be fetched")
+    display.next_step("boepie corpus index --collection docs")
+
+
+# Which marker a reconciliation action earns in a detail line.
+_ACTION_MARKERS = {"added": "+", "refetched": "~", "deleted": "-", "skipped": "="}
+
+
+def _detail_limit(verbose: bool) -> int | None:
+    """How many item lines an operation may print. None (all of them) under
+    --verbose, which is what that flag is for."""
+    return None if verbose else display.DETAIL_LIMIT
+
+
+def _report_fetch(
+    noun: str,
+    *,
+    elapsed: float,
+    added: list,
+    refetched: list,
+    deleted: list,
+    skipped: int,
+    verbose: bool,
+) -> None:
+    """One line for a reconciliation, then the documents that actually moved.
+
+    `Fetched` when something changed and `Checked` when nothing did - the
+    distinction a reader is really after, and one the old
+    "0 added, 0 refetched, 17 skipped, 0 deleted" made them compute for
+    themselves out of four numbers, three of which are zero on any ordinary
+    run. The counts are still there, but only for the actions that happened.
+    """
+    changes = [
+        f"{len(added)} added" if added else "",
+        f"{len(refetched)} refetched" if refetched else "",
+        f"{len(deleted)} deleted" if deleted else "",
+    ]
+    summary = ", ".join(part for part in changes if part)
+    if not summary:
+        display.operation(
+            "Checked", f"{skipped} {noun}, all current", elapsed=elapsed, style="muted"
         )
-    display.next_step("boepie index build --collection docs", indent="  ")
+        return
+
+    unchanged = f", {skipped} unchanged" if skipped else ""
+    display.operation("Fetched", f"{summary}{unchanged}", elapsed=elapsed)
+    limit = _detail_limit(verbose)
+    display.details("+", [_fetch_label(result) for result in added], limit=limit)
+    display.details("~", [_fetch_label(result) for result in refetched], limit=limit)
+    display.details("-", [_fetch_label(result) for result in deleted], limit=limit)
+
+
+def _fetch_label(result: object) -> str:
+    """What to call one reconciled document in a detail line: a paper's
+    citekey, a docs project's name."""
+    return str(getattr(result, "citekey", None) or getattr(result, "project", "?"))
 
 
 @contextlib.contextmanager
@@ -1338,23 +1360,42 @@ def _fetch_progress(description: str, total: int, verbose: bool):
     if verbose:
         yield lambda: None
         return
-    with Progress(
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        MofNCompleteColumn(),
-        TimeElapsedColumn(),
-        TimeRemainingColumn(),
-        console=console,
-    ) as progress:
-        task_id = progress.add_task(description, total=total)
-        yield lambda: progress.advance(task_id)
+    with display.progress_bar(description, total) as advance:
+        yield advance
+
+
+def _plural(count: int, noun: str, plural: str = "") -> str:
+    """`1 document`, `2 documents` - the count and its noun, agreeing.
+
+    `document(s)` is the shape that avoids the decision, and it reads as
+    machine output in a report whose whole point is that a person can scan
+    it. Nine sites spelled it that way; this is the one place that now does
+    not have to.
+    """
+    return f"{count} {noun if count == 1 else (plural or noun + 's')}"
+
+
+def _relative_to(location: Path, directory: Path) -> str:
+    """`location` written relative to `directory` when it sits inside it.
+
+    An absolute path is usually the longest thing on a line and is one token,
+    so rich breaks it mid-word across two or three rows - unreadable, and
+    impossible to copy back out. Inside a workspace the leading directory is
+    also the least informative part: the reader is standing in it. Falls back
+    to the absolute path when the location is genuinely elsewhere, where the
+    prefix is the whole point.
+    """
+    try:
+        return str(location.relative_to(directory))
+    except ValueError:
+        return str(location)
 
 
 def _no_bundle_error() -> CliError:
     """No `.boepie/` bundle governs the working directory."""
     return CliError(
         f"no .boepie/ bundle found in {Path.cwd()} or any parent. "
-        f"Run 'boepie context init'."
+        f"Run {display.command('boepie context init')}."
     )
 
 
@@ -1370,7 +1411,8 @@ def _no_such_document_error(document_id: str, collections: tuple[str, ...]) -> C
     where = ",".join(collections)
     return CliError(
         f"no document with id '{document_id}' in {where}. "
-        f"Run 'boepie corpus list --collection {where}' to see what is there."
+        f"Run {display.command(f'boepie corpus list --collection {where}')} "
+        f"to see what is there."
     )
 
 
@@ -1385,7 +1427,8 @@ def _corpus_documents(collection: str):
         raise CliError(
             f"a document in '{collection}' predates the current frontmatter "
             f"schema ({one_line(error.args[0])}). Run "
-            f"'uv run scripts/migrate_corpus_layout.py' to bring the corpus "
+            f"{display.command('uv run scripts/migrate_corpus_layout.py')} "
+            f"to bring the corpus "
             f"up to date."
         ) from error
 
@@ -1398,6 +1441,202 @@ def _managed_counts(documents) -> tuple[int, int]:
         if document.frontmatter.get("managed_by") == "boepie"
     )
     return boepie_managed, len(documents) - boepie_managed
+
+
+@corpus.command("index")
+@click.option(
+    "--collection",
+    "collections",
+    default=_ALL,
+    show_default=True,
+    type=CollectionList(_CORPUS_COLLECTIONS),
+    help="Comma-separated collections to index, or 'all'.",
+)
+@click.option(
+    "-l", "--literature", "shorthand", flag_value="literature",
+    help="Index the literature corpus.",
+)
+@click.option(
+    "-d", "--docs", "shorthand", flag_value="docs", help="Index the docs corpus."
+)
+@click.option(
+    "-n", "--notes", "shorthand", flag_value="notes", help="Index the notes corpus."
+)
+@embedding_options
+@click.option(
+    "--embedding-concurrency",
+    default=None,
+    type=int,
+    help="Max concurrent embedding requests (default: 4). Lower this if you're "
+    "hitting API rate limits.",
+)
+@click.option(
+    "--index-name",
+    default=None,
+    help="Override the auto-derived index id (default: <binding>-<model>).",
+)
+@click.option(
+    "--check-only",
+    "check_only",
+    is_flag=True,
+    help="Report each index's state and path and build nothing. "
+    "Exits non-zero if any selected index is missing or stale.",
+)
+@click.option("-v", "--verbose", is_flag=True, help="Show per-batch progress logging.")
+@click.pass_context
+def corpus_index(
+    ctx: click.Context,
+    collections: tuple[str, ...],
+    shorthand: str | None,
+    resolve_embedding,
+    embedding_concurrency: int | None,
+    index_name: str | None,
+    check_only: bool,
+    verbose: bool,
+) -> None:
+    """Build the search index over one or more corpus collections.
+
+    A verb on `corpus` rather than a noun of its own, so the scope is named
+    once and in one spelling: `corpus sync -l` then `corpus index -l`, not
+    `corpus index --collection literature`.
+
+    With no selection this indexes every corpus collection that has something
+    to index, reporting the ones it skipped rather than failing on them - an
+    empty corpus is a normal state when you did not name it. Naming one
+    explicitly does make an empty one an error: you asked for that index.
+
+    Needs nothing running by default: fastembed runs a small ONNX model
+    locally on CPU (one-time model download, then fully offline). Use
+    --embedding-binding=ollama for a local Ollama daemon, or
+    --embedding-binding=openai for an OpenAI API key or a local
+    OpenAI-compatible server (vLLM/SGLang/TGI) via --embedding-host=<url>.
+    """
+    _set_verbosity(verbose)
+    selected = _index_selection(ctx, collections, shorthand)
+
+    if check_only:
+        _check_indices(selected, INDEX_DIR)
+        return
+
+    if index_name is not None and len(selected) > 1:
+        raise CliError(
+            "--index-name names one index, so it cannot be combined with "
+            "several collections. Build them one at a time, or drop the flag."
+        )
+    _require_corpus(selected)
+
+    # An explicit single collection is a request for that index; anything
+    # broader is a sweep, where "nothing to index" is a skip, not a failure.
+    sweeping = len(selected) > 1
+    built = 0
+    for collection in selected:
+        try:
+            _build_corpus_index(
+                collection,
+                resolve_embedding=resolve_embedding,
+                embedding_concurrency=embedding_concurrency,
+                index_name=index_name,
+            )
+        except EmptyCollectionError as error:
+            if not sweeping:
+                raise CliError(str(error)) from error
+            display.operation(
+                "Skipped", f"{collection} index - no documents", style="muted"
+            )
+            continue
+        built += 1
+
+    if sweeping:
+        # Coloured by what happened, like every other line: green when
+        # something was built, dim when nothing was. It was unconditionally
+        # dim, so one run could print `Indexed 122 chunks ...` in green and
+        # `Indexed 2 of 3 collections` in grey two lines later - the same verb
+        # in two colours for no reason a reader could see.
+        display.operation(
+            "Indexed",
+            f"{built} of {_plural(len(selected), 'collection')}",
+            style="success" if built else "muted",
+        )
+
+
+def _index_selection(
+    ctx: click.Context, collections: tuple[str, ...], shorthand: str | None
+) -> tuple[str, ...]:
+    """`--collection` or a `-l`/`-d`/`-n` shorthand, never both.
+
+    The same rule `corpus add` follows, for the same reason: two ways of
+    saying which collection can disagree, and silence about that would let
+    the wrong index be built.
+    """
+    if shorthand is None:
+        return collections
+    source = ctx.get_parameter_source("collections")
+    if source is not None and source.name != "DEFAULT":
+        raise CliError(
+            f"--collection and {_ADD_SHORTHANDS[shorthand]} both name a "
+            f"collection. Use one."
+        )
+    return (shorthand,)
+
+
+def _report_index_states(
+    targets: list[tuple[str, Path]], *, first: bool = True
+) -> list[str]:
+    """One heading and state block per (collection, index root); the unusable
+    ones come back.
+
+    Reporting and deciding are split because a check must describe
+    *everything* before it fails: `boepie index --check-only` covers the
+    corpus and the bundle, and raising at the end of the first leg would mean
+    never looking at the second - which is the one an `index status` could
+    never see in the first place.
+    """
+    wrong: list[str] = []
+    with display.following_steps(False):
+        for position, (collection, index_root) in enumerate(targets):
+            if position or not first:
+                console.print()
+            console.print(
+                display.collection_root(collection, index_root / collection),
+                soft_wrap=True,
+            )
+            if _index_rows(collection, index_root):
+                wrong.append(collection)
+    return wrong
+
+
+def _check_indices(collections: tuple[str, ...], index_root: Path) -> None:
+    """Report each selected corpus index's state, building nothing.
+
+    The read half of the same command, as `register --check-only` is - the
+    analysis is identical, only the applying is skipped.
+    """
+    wrong = _report_index_states([(name, index_root) for name in collections])
+    if wrong:
+        raise _unusable_indices_error(wrong)
+
+
+def _unusable_indices_error(wrong: list[str]) -> CliError:
+    """The one refusal for indices that cannot be searched, naming the commands
+    that rebuild exactly those.
+
+    The corpus collections collapse into a single `--collection a,b,c`, since
+    one command builds them all; the bundle needs its own, because its index
+    is not a corpus collection at all. Two commands at most, never one per
+    collection.
+    """
+    corpus_names = [name for name in wrong if name != _CONTEXT_COLLECTION]
+    commands = []
+    if corpus_names:
+        commands.append(f"boepie corpus index --collection {','.join(corpus_names)}")
+    if _CONTEXT_COLLECTION in wrong:
+        commands.append("boepie context index")
+    return CliError(
+        f"{_plural(len(wrong), 'index', 'indices')} not usable: "
+        f"{', '.join(wrong)}. Run "
+        + " then ".join(display.command(name) for name in commands)
+        + "."
+    )
 
 
 @corpus.command("status")
@@ -1415,15 +1654,35 @@ def corpus_status(collections: tuple[str, ...]) -> None:
     Advisory only, like `context status`: never fetches or writes anything.
     Every collection reports the same three things - how much is boepie's,
     how much is yours, and what is out of step with the packaged manifest.
+
+    **A corpus with no directory yet is reported as absent, not as empty.**
+    On a machine where nothing has been fetched the old output described
+    three directories that do not exist, counted zero documents in each, and
+    then listed all 17 manifest citekeys and 3 projects as `missing:` - a
+    wall of text about a corpus that has no place on this machine at all.
+    Diffing against the packaged manifest only means something once there is
+    something to diff. `context status` already refuses this way when there
+    is no bundle; when every selected collection is absent this does the
+    same, and a mixed machine gets one row per absent collection instead.
     """
+    if all(not _corpus_collection_dir(name).is_dir() for name in collections):
+        selected = ", ".join(collections)
+        # `boepie init` whichever collection was asked for: it is the one
+        # command that creates a corpus directory, and it creates all three.
+        # It used to name `setup`, which populates literature and docs and
+        # never notes - so `--collection notes` was told to run something
+        # that would not have created it.
+        raise CliError(
+            f"no corpus on this machine - {selected} "
+            f"{'has' if len(collections) == 1 else 'have'} no directory to "
+            f"report on. Run {display.command('boepie init')} to create one."
+        )
     for position, collection in enumerate(collections):
         _corpus_status_one(collection, first=position == 0)
 
 
 def _corpus_status_one(collection: str, *, first: bool) -> None:
     collection_dir = _corpus_collection_dir(collection)
-    documents = _corpus_documents(collection)
-    boepie_managed, user_managed = _managed_counts(documents)
 
     # A blank line between collections: three of these run together
     # otherwise, and the heading is the only thing separating them.
@@ -1431,17 +1690,37 @@ def _corpus_status_one(collection: str, *, first: bool) -> None:
         console.print()
     # soft_wrap, or rich breaks a long corpus path mid-token across two lines.
     console.print(display.collection_root(collection, collection_dir), soft_wrap=True)
+
+    if not collection_dir.is_dir():
+        display.warning(
+            "not created yet",
+            lead=_status_label("corpus"),
+            indent="  ",
+        )
+        display.next_step("boepie init")
+        return
+
+    documents = _corpus_documents(collection)
+    boepie_managed, user_managed = _managed_counts(documents)
     display.muted(
         f"{len(documents)} total, {boepie_managed} boepie-managed, "
         f"{user_managed} yours",
         lead=_status_label("documents"),
         indent="  ",
     )
+    # The index, with the corpus it was built from, rather than under an
+    # `index status` of its own: an index belongs to the thing it indexes,
+    # and a reader asking "is literature in good shape" wants both answers
+    # in one place. After the document count, which is what it is a claim
+    # about - and only when there is something to index, since "not built
+    # yet" against an empty collection sends the reader in a circle.
+    if documents:
+        _index_rows(collection, INDEX_DIR)
 
     if collection == "notes":
         # No manifest to diff against: notes are always yours.
         if not documents:
-            display.next_step("boepie corpus add -n <file-or-url>", indent="  ")
+            display.next_step(_corpus_population_command(collection))
         return
 
     if collection == "literature":
@@ -1485,7 +1764,7 @@ def _corpus_status_one(collection: str, *, first: bool) -> None:
 
     if missing:
         display.warning(
-            f"{len(missing)} {label}(s) in the manifest not fetched yet",
+            f"{_plural(len(missing), label)} in the manifest not fetched yet",
             lead=_status_label("missing"),
             indent="  ",
         )
@@ -1498,7 +1777,7 @@ def _corpus_status_one(collection: str, *, first: bool) -> None:
         # reader round a loop - status says fetch, fetch does nothing, status
         # says fetch.
         display.muted(
-            f"{len(claimed)} {label}(s) in the manifest are yours here, so "
+            f"{_plural(len(claimed), label)} in the manifest are yours here, so "
             f"fetch leaves them alone",
             lead=_status_label("yours"),
             indent="  ",
@@ -1506,26 +1785,27 @@ def _corpus_status_one(collection: str, *, first: bool) -> None:
         _status_items(claimed)
     if orphaned:
         display.warning(
-            f"{len(orphaned)} {label}(s) no longer in the manifest "
+            f"{_plural(len(orphaned), label)} no longer in the manifest "
             f"(next fetch deletes them)",
             lead=_status_label("orphaned"),
             indent="  ",
         )
         _status_items(orphaned)
     if not missing and not orphaned:
-        display.success(
-            "in step with the packaged manifest",
+        display.muted(
+            "current with the one boepie ships",
             lead=_status_label("manifest"),
             indent="  ",
         )
     else:
-        display.next_step(f"boepie corpus fetch --collection {collection}", indent="  ")
+        display.next_step(_corpus_population_command(collection))
     if claimed:
         # In the value column and kept short, like the "no HTML" advice
         # above: rich would otherwise break the command across a line end,
         # which is the one thing a line naming a command must not do.
         display.info(
-            f"hand back: boepie corpus remove --collection {collection} <id>",
+            f"hand back: "
+            f"{display.command(f'boepie corpus remove --collection {collection} <id>')}",
             indent=_STATUS_VALUE_INDENT,
         )
 
@@ -1551,7 +1831,8 @@ def _corpus_list_one(collection: str) -> None:
     documents = _corpus_documents(collection)
     if not documents:
         display.warning(
-            f"Add one with: boepie corpus add --collection {collection} <identifier>",
+            f"Add one with: "
+            f"{display.command(f'boepie corpus add --collection {collection} <identifier>')}",
             lead=f"No documents in '{collection}'.",
         )
         return
@@ -1564,7 +1845,7 @@ def _corpus_list_one(collection: str) -> None:
         title = document.frontmatter.get("title") or document.id
         managed_by = document.frontmatter.get("managed_by", "?")
         display.document_entry(str(title), document.id, managed_by)
-    display.info(f"{len(documents)} document(s).", indent="\n")
+    display.info(f"{_plural(len(documents), 'document')}.", indent="\n")
 
 
 def _reject_unusable_citekey(citekey: str) -> None:
@@ -1690,15 +1971,15 @@ def corpus_move(
         source, target_md_path=target_dir / filename, frontmatter_updates=updates
     )
 
-    display.success(
+    display.operation(
+        "Moved",
         f"{new_title} (id={document_id}) -> "
         f"{moved.md_path.relative_to(collection_dir)}",
-        lead="Moved",
     )
     if citekey is not None:
         display.muted(f"citekey is now '{citekey}'.")
     display.next_step(
-        f"boepie index build --collection {collection}",
+        f"boepie corpus index --collection {collection}",
         before="Read handles are unchanged.",
     )
 
@@ -1728,7 +2009,8 @@ def _corpus_tree_one(collection: str) -> None:
     documents = _corpus_documents(collection)
     if not documents:
         display.warning(
-            f"Add one with: boepie corpus add --collection {collection} <identifier>",
+            f"Add one with: "
+            f"{display.command(f'boepie corpus add --collection {collection} <identifier>')}",
             lead=f"No documents in '{collection}'.",
         )
         return
@@ -1760,7 +2042,7 @@ def _corpus_tree_one(collection: str) -> None:
         parent.add(display.document_leaf(str(title), document.id, managed_by))
 
     console.print(tree)
-    display.info(f"{len(documents)} document(s).", indent="\n")
+    display.info(f"{_plural(len(documents), 'document')}.", indent="\n")
 
 
 # ---------------------------------------------------------------------------
@@ -2186,7 +2468,7 @@ async def _read_span(
     except KeyError as error:
         raise CliError(
             f"{one_line(error.args[0])} Use a document_id and chunk_index from a "
-            f"'boepie search --collection {collection}' hit."
+            f"{display.command(f'boepie search --collection {collection}')} hit."
         ) from error
 
 
@@ -2196,7 +2478,13 @@ async def _read_span(
 
 
 def _build_context_index(bundle_dir: Path) -> None:
-    """Build the bundle's own BM25 index and report the count."""
+    """Build the bundle's own BM25 index and report the count.
+
+    No progress bar: BM25 needs no embedding backend, so this is under a
+    second even on a full bundle. A bar that appears and vanishes inside one
+    frame is worse than none.
+    """
+    started = time.monotonic()
     manifest = _run(
         build(
             ContextLoader(bundle_dir),
@@ -2204,10 +2492,10 @@ def _build_context_index(bundle_dir: Path) -> None:
             index_root=index_root_for(bundle_dir),
         )
     )
-    display.success(
-        f"{manifest.count} chunks into "
-        f"'{bundle_dir.name}/.index/context/bm25' (BM25 only).",
-        lead="Indexed",
+    display.operation(
+        "Indexed",
+        f"{_plural(manifest.count, 'chunk')} into {bundle_dir.name}/.index (BM25 only)",
+        elapsed=time.monotonic() - started,
     )
 
 
@@ -2224,19 +2512,18 @@ def _note_legacy_global_index() -> None:
     """
     legacy_dir = INDEX_DIR / "knowledge"
     if legacy_dir.exists():
-        display.warning(
+        display.note(
             f"unused legacy knowledge index at {legacy_dir} "
-            f"(superseded by the per-bundle one); safe to delete.",
-            lead="Note:",
+            f"(superseded by the per-bundle one); safe to delete."
         )
 
 
 @cli.group()
 def context() -> None:
-    """Manage the `.boepie/` context bundle (init, apply, status, reset)."""
+    """Manage the `.boepie/` context bundle (init, sync, status, reset)."""
 
 
-@context.command()
+@context.command("init")
 @click.option(
     "--directory",
     type=click.Path(exists=True, file_okay=False, path_type=str),
@@ -2246,7 +2533,7 @@ def context() -> None:
 )
 @click.option("--skills", is_flag=True, help="(not implemented yet)")
 @click.option("--hooks", is_flag=True, help="(not implemented yet)")
-def init(directory: str, skills: bool, hooks: bool) -> None:
+def context_init(directory: str, skills: bool, hooks: bool) -> None:
     """Initialize the `.boepie/` context bundle.
 
     Creates the bundle from the content this boepie ships (in the venv it is
@@ -2255,11 +2542,12 @@ def init(directory: str, skills: bool, hooks: bool) -> None:
     (git-ignored, so the committable bundle carries no derived state).
     """
     if skills:
-        display.warning("--skills not implemented yet")
+        display.note("--skills not implemented yet")
     if hooks:
-        display.warning("--hooks not implemented yet")
+        display.note("--hooks not implemented yet")
 
     target_dir = Path(directory).resolve()
+    started = time.monotonic()
     try:
         init_bundle(target_dir)
     except FileExistsError as error:
@@ -2269,13 +2557,17 @@ def init(directory: str, skills: bool, hooks: bool) -> None:
     append_agents_pointer(agents_md)
 
     bundle_dir = target_dir / ".boepie"
-    display.success(f"bundle at {bundle_dir}", lead="Initialized")
+    display.operation(
+        "Initialized",
+        f"bundle at {_relative_to(bundle_dir, target_dir)}",
+        elapsed=time.monotonic() - started,
+    )
 
-    _build_context_index(bundle_dir)
     _note_legacy_global_index()
+    display.next_step("boepie context index")
 
 
-@context.command()
+@context.command("sync")
 @click.option(
     "--directory",
     type=click.Path(exists=True, file_okay=False, path_type=str),
@@ -2294,7 +2586,7 @@ def init(directory: str, skills: bool, hooks: bool) -> None:
         "a leading .boepie/ is stripped if present; repeatable)."
     ),
 )
-def apply(directory: str, force_targets: tuple[str, ...]) -> None:
+def context_sync(directory: str, force_targets: tuple[str, ...]) -> None:
     """Converge the bundle with the content this boepie ships.
 
     Rewrites every `managed_by: boepie` file from the content in the venv
@@ -2306,16 +2598,76 @@ def apply(directory: str, force_targets: tuple[str, ...]) -> None:
     every local file at once).
     """
     target_dir = Path(directory).resolve()
+    started = time.monotonic()
     try:
         apply_bundle(target_dir, context_content_dir(), force_paths=force_targets)
     except (FileNotFoundError, ValueError) as error:
         raise CliError(str(error)) from error
 
     bundle_dir = target_dir / ".boepie"
-    display.success(f"bundle at {bundle_dir}", lead="Applied")
+    display.operation(
+        "Applied",
+        f"bundle at {_relative_to(bundle_dir, target_dir)}",
+        elapsed=time.monotonic() - started,
+    )
 
-    _build_context_index(bundle_dir)
     _note_legacy_global_index()
+    # Not indexed here. Converging the bundle and indexing it are two steps
+    # with two owners, the same way `corpus sync` leaves `corpus index` to
+    # follow it - and context was the only noun that did both, so it was the
+    # one place the model lied.
+    display.next_step("boepie context index")
+
+
+@context.command("index")
+@click.option(
+    "--directory",
+    type=click.Path(exists=True, file_okay=False, path_type=str),
+    default=".",
+    show_default=True,
+    help="Target directory containing .boepie/.",
+)
+@click.option(
+    "--check-only",
+    "check_only",
+    is_flag=True,
+    help="Report the index's state and path and build nothing. "
+    "Exits non-zero if it is missing or stale.",
+)
+def context_index(directory: str, check_only: bool) -> None:
+    """Build the bundle's own BM25 search index.
+
+    Per-project and BM25-only, so it lands inside the bundle it was built
+    from (`<bundle>/.index/`) rather than in the machine-global store: two
+    projects must not share one index of two different bundles. That is also
+    why this is `context index` and not a collection of `corpus index` -
+    they share no storage, no scope and no retrieval stack.
+    """
+    bundle_dir = _require_bundle(Path(directory).resolve())
+    if check_only:
+        console.print(
+            display.collection_root(
+                _CONTEXT_COLLECTION, index_root_for(bundle_dir) / _CONTEXT_COLLECTION
+            ),
+            soft_wrap=True,
+        )
+        with display.following_steps(False):
+            unusable = _index_rows(_CONTEXT_COLLECTION, index_root_for(bundle_dir))
+        if unusable:
+            raise CliError(
+                f"the bundle's index is not usable. Run "
+                f"{display.command('boepie context index')}."
+            )
+        return
+    _build_context_index(bundle_dir)
+
+
+def _require_bundle(target_dir: Path) -> Path:
+    """The `.boepie/` governing `target_dir`, or the one refusal for its absence."""
+    bundle_dir = target_dir / ".boepie"
+    if not bundle_dir.is_dir():
+        raise _no_bundle_error()
+    return bundle_dir
 
 
 @context.command()
@@ -2327,7 +2679,7 @@ def apply(directory: str, force_targets: tuple[str, ...]) -> None:
     help="Target directory containing .boepie/.",
 )
 def status(directory: str) -> None:
-    """Report the bundle's state relative to installed versions."""
+    """Report the bundle's state relative to installed versions, and its index."""
     target_dir = Path(directory).resolve()
     try:
         status_result = bundle_status(target_dir)
@@ -2337,12 +2689,11 @@ def status(directory: str) -> None:
     report = display.success if status_result.state == "current" else display.warning
     report(status_result.detail, lead=f"{status_result.state}:")
 
+    # The bundle's index is one more fact about the bundle, so it is reported
+    # here rather than by an `index status` of its own - which could not see
+    # it anyway, having only ever enumerated the machine-global INDEX_DIR.
     bundle_dir = target_dir / ".boepie"
-    if not index_root_for(bundle_dir).exists():
-        display.warning(
-            f"run `boepie context apply` to build {index_root_for(bundle_dir)}",
-            lead="no search index:",
-        )
+    _index_rows(_CONTEXT_COLLECTION, index_root_for(bundle_dir))
     _note_legacy_global_index()
 
 
@@ -2359,7 +2710,7 @@ def context_reset(directory: str, yes: bool) -> None:
     """Delete `.boepie/` and rebuild it from scratch.
 
     Discards every `managed_by: user` file outright, including ones with no
-    upstream counterpart to revert to (unlike `context apply --force`, which
+    upstream counterpart to revert to (unlike `context sync --force`, which
     only reverts a named file when boepie still has something to revert it
     to). Prompts for confirmation naming every local file that would be lost
     unless --yes is passed or there is nothing to lose.
@@ -2367,14 +2718,17 @@ def context_reset(directory: str, yes: bool) -> None:
     target_dir = Path(directory).resolve()
     bundle_dir = target_dir / ".boepie"
     if not bundle_dir.exists():
-        raise CliError(f"no bundle at {bundle_dir}. Run 'boepie context init' first.")
+        raise CliError(
+            f"no bundle at {bundle_dir}. "
+            f"Run {display.command('boepie context init')} first."
+        )
 
     local_paths = list_source_local_files(bundle_dir)
     if local_paths and not yes:
         for relative_path in local_paths:
             display.info(str(relative_path), indent="  ")
         confirmed = click.confirm(
-            f"This permanently deletes {len(local_paths)} local file(s) listed above "
+            f"This permanently deletes {_plural(len(local_paths), 'local file')} listed above "
             "and rebuilds .boepie/ from scratch. Continue?",
             default=False,
         )
@@ -2386,14 +2740,14 @@ def context_reset(directory: str, yes: bool) -> None:
     except FileNotFoundError as error:
         raise CliError(str(error)) from error
 
-    display.success(f"bundle at {bundle_dir}", lead="Reset")
+    display.operation("Reset", f"bundle at {_relative_to(bundle_dir, target_dir)}")
 
     _build_context_index(bundle_dir)
     _note_legacy_global_index()
 
 
 # ---------------------------------------------------------------------------
-# Sync: composite bootstrap (corpus fetch -> index build -> context
+# Sync: composite convergence (corpus sync -> context sync), which
 # apply/init)
 # ---------------------------------------------------------------------------
 
@@ -2406,57 +2760,10 @@ def context_reset(directory: str, yes: bool) -> None:
 _SYNC_COLLECTIONS = ("literature", "docs")
 
 
-def _build_synced_index(collection: str, *, indent: str = "") -> None:
-    """Build one collection's index during `sync`, skipping an empty corpus.
-
-    Hybrid (BM25 + dense), unlike the context bundle's BM25-only index, and
-    the embedding config is `default_embedding_binding()` - the active
-    BOEPIE_EMBEDDING_* config, matching what `index build --collection X`
-    would use with no overrides.
-
-    An empty corpus is a normal state here rather than a failure: a fetch
-    that just warned and continued leaves nothing to index, and `sync` still
-    has a bundle to converge afterwards.
-    """
-    try:
-        manifest = _run(
-            build(
-                _loader_for(collection),
-                index_root=INDEX_DIR,
-                embedding=default_embedding_binding(),
-            )
-        )
-    except EmptyCollectionError:
-        display.muted(f"nothing to index in '{collection}'", indent=indent or "  ")
-        return
-    display.success(
-        f"{manifest.count} chunks into "
-        f"'{collection}/{manifest.index_id}' (embedding={manifest.embedding_kind}:{manifest.embedding_model}).",
-        lead="Indexed",
-        indent=indent,
-    )
-
-
-@contextlib.contextmanager
-def _quiet(enabled: bool):
-    """Swallow everything `console` prints inside the block when `enabled`.
-
-    Used by `sync`'s default (non-verbose) run so its component steps -
-    `corpus fetch`, `index build`, `apply`/`init` - stay silent and sync can
-    report a single summary line instead of each step's own output.
-    """
-    if not enabled:
-        yield
-        return
-    with console.capture():
-        yield
-
-
 def _sync_network_step(
     ctx: click.Context,
     command: click.Command,
     label: str,
-    quiet: bool,
     **params: object,
 ) -> None:
     """Run the network step of `sync`/`setup` - the corpus fetch, now the only
@@ -2467,90 +2774,186 @@ def _sync_network_step(
     `command` is invoked exactly as its own CLI entry point would be (missing
     options fall back to that command's own defaults via `ctx.invoke`), so
     this adds no fetch logic of its own - only the warn-and-continue wrapper.
-    The warning itself is printed outside `_quiet` so it is visible even in
-    the default, non-verbose run.
+    There is no quieting here any more. `sync` used to run every step inside
+    `console.capture()` and print one summary line, which hid its slowest leg
+    and - as a side effect nobody decided - disabled the progress bars too,
+    since a captured console is not a terminal. `-q` on the top-level group
+    is the one place that turns output down now.
     """
     try:
-        with _quiet(quiet):
-            ctx.invoke(command, **params)
+        ctx.invoke(command, **params)
+    except Cancelled:
+        # Deliberately not swallowed. This wrapper exists to carry on past a
+        # fetch that *failed* - an unreachable arXiv should still leave the
+        # previously fetched corpus indexed - and a Ctrl-C is the one thing
+        # that must stop the whole run instead. It used to arrive here as
+        # `SystemExit(130)` and be reported as `{label} failed: 130`, after
+        # which every later phase ran and the command exited 0.
+        raise
     except (SystemExit, httpx.HTTPError) as error:
-        display.warning(f"{label} failed: {error}", lead="Warning:")
+        display.note(f"{label} failed: {error}")
+
+
+def _report_index_drift(target_dir: Path) -> None:
+    """After converging, say what that did to each index - and nothing more.
+
+    `sync` used to rebuild them itself. Reporting instead is the same split
+    every noun already follows (`corpus sync` -> `corpus index`), and it is
+    the more honest of the two: the reader learns that two papers arrived and
+    that the literature index no longer covers them, rather than waiting out
+    a rebuild nobody announced.
+
+    The analysis is `_index_plan`'s, the one `setup` already used to decide -
+    so this reports exactly what the `boepie index` it names would do, rather
+    than a second opinion about it.
+    """
+    drifted: list[str] = []
+    # Every corpus collection, not just the two `sync` fetches. `notes` is
+    # where documents you added yourself land, so it is precisely the case
+    # this report exists for - sync did not put them there, but it is the
+    # command that tells you the index has not caught up.
+    for collection in _CORPUS_COLLECTIONS:
+        action, reason = _index_plan(collection)
+        if action == "empty":
+            continue
+        if action == "keep":
+            display.operation(
+                "Checked", f"{collection} index - {reason}", style="muted"
+            )
+            continue
+        drifted.append(collection)
+        display.operation(
+            "Checked",
+            f"{collection} index - "
+            f"{'not built yet' if action == 'build' else reason}",
+            style="warning",
+        )
+
+    bundle_index = index_root_for(target_dir / ".boepie") / _CONTEXT_COLLECTION
+    if not (bundle_index / "latest.json").is_file():
+        drifted.append(_CONTEXT_COLLECTION)
+        display.operation("Checked", "context index - not built yet", style="warning")
+    else:
+        # `context sync` rewrites every boepie-managed file from the venv, so
+        # the bundle's index is behind whenever anything actually changed.
+        # `index_freshness` reads the recorded digests rather than guessing.
+        try:
+            manifest = json.loads(
+                (bundle_index / "manifest.json").read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError):
+            manifest = {}
+        freshness = index_freshness(manifest.get("built_from"), _CONTEXT_COLLECTION)
+        if freshness.state == "stale" or freshness.added:
+            drifted.append(_CONTEXT_COLLECTION)
+            display.operation(
+                "Checked", "context index - behind the bundle", style="warning"
+            )
+        else:
+            display.operation("Checked", "context index - current", style="muted")
+
+    if drifted:
+        display.next_step("boepie index")
 
 
 @cli.command()
-@click.option(
-    "--only",
-    type=click.Choice(["context", "indices"]),
-    default=None,
-    help="Restrict sync to just the context bundle or just the indices (default: both).",
-)
 @click.option(
     "--directory",
     type=click.Path(exists=True, file_okay=False, path_type=str),
     default=".",
     show_default=True,
-    help="Target directory for the context bundle.",
+    help="Workspace holding the .boepie/ bundle to converge.",
 )
-@click.option(
-    "-v",
-    "--verbose",
-    is_flag=True,
-    help="Show each step's own output instead of a one-line summary.",
-)
+@click.option("-v", "--verbose", is_flag=True, help="Show progress per item.")
 @click.pass_context
-def sync(ctx: click.Context, only: str | None, directory: str, verbose: bool) -> None:
-    """Bring the context bundle and the default corpora up to date in one step.
+def sync(ctx: click.Context, directory: str, verbose: bool) -> None:
+    """Converge every collection with its source: the corpora and the bundle.
 
-    Composite of `corpus fetch --collection literature,docs` -> `index build`
-    for both -> `context apply` (or `init` on a first run, when no `.boepie/`
-    exists yet under --directory). Adds nothing of its own beyond calling
-    those steps: `corpus fetch` already skips a document already converted,
-    and `apply`/`init` already rebuild the bundle's own BM25 index.
+    The populate half of the pair. `boepie init` scaffolds - fast, offline,
+    idempotent - and this is the slow leg: `corpus sync` pulls each paper
+    from arXiv and crawls each documentation site, and `context sync`
+    converges the bundle with the content in this venv. The first run on a
+    machine takes minutes; both fetches are resumable, so later runs pick up
+    only what is new.
 
-    The bundle's content is not fetched at all: it ships in the venv boepie
-    is installed in, so `apply`/`init` copy it straight from there.
+    **It scaffolds nothing.** An uninitialised workspace is refused, naming
+    `boepie init`. It used to create the `.boepie/` bundle itself when there
+    was none, which made a fresh directory look like a working one - the
+    command reported success against state it had just invented, and there
+    was no point at which anyone had said "set this up here".
 
-    **Every index is built here, never downloaded.** boepie publishes no
-    prebuilt index, so the first `sync` on a machine fetches each paper from
-    arXiv and crawls each documentation site, which takes minutes rather than
-    seconds. Both fetches are resumable, so a later `sync` only picks up
-    what is new.
+    **There is no `--only`.** It named one noun at a time, which is what the
+    per-noun commands already are: `boepie sync --only corpus` was a second
+    spelling of `boepie corpus sync`, with a second place for the two to
+    disagree. This command means both.
 
-    The corpus fetch warns and continues on failure instead of aborting, so
-    the final convergence step still runs against whatever was previously
-    fetched - the overall exit code stays 0 as long as that local step
-    succeeds. By default only a one-line summary is
-    printed; pass --verbose to see each step's own message.
+    **It builds no index.** Converging content and rebuilding the index over
+    it are two different costs - a fetch is seconds, an embed is minutes -
+    and folding them together meant a run that only wanted to check for new
+    papers spent that time without being asked. What it does instead is
+    *say* what the convergence did to each index, which is information the
+    silent rebuild never gave, and name `boepie index`.
     """
-    sync_context = only != "indices"
-    sync_indices = only != "context"
-    quiet = not verbose
+    target_dir = Path(directory).resolve()
+    _require_initialised(target_dir)
 
-    if sync_indices:
+    # `corpus sync` closes by advising `corpus index`, once per collection.
+    # This command reports index drift as a whole at the end and names
+    # `boepie index` once, so the per-collection advice would be the same
+    # thing said four times over.
+    with display.following_steps(False):
         _sync_network_step(
             ctx,
-            corpus_fetch,
-            f"corpus fetch --collection {','.join(_SYNC_COLLECTIONS)}",
-            quiet,
+            corpus_sync,
+            f"corpus sync --collection {','.join(_SYNC_COLLECTIONS)}",
             collections=_SYNC_COLLECTIONS,
             force_targets=(),
             delay=None,
-            verbose=False,
+            verbose=verbose,
         )
-        with _quiet(quiet):
-            for collection in _SYNC_COLLECTIONS:
-                _build_synced_index(collection)
 
-    if sync_context:
-        target_dir = Path(directory).resolve()
-        with _quiet(quiet):
-            if (target_dir / ".boepie").exists():
-                ctx.invoke(apply, directory=directory)
-            else:
-                ctx.invoke(init, directory=directory, skills=False, hooks=False)
+    with display.following_steps(False):
+        ctx.invoke(context_sync, directory=directory)
 
-    if quiet:
-        display.success("context bundle and corpora.", lead="Synced")
+    _report_index_drift(target_dir)
+
+
+def _suggest_registration(target_dir: Path) -> None:
+    """Close the chain by naming `boepie register`, if nothing is registered.
+
+    `init` -> `sync` -> `index` -> `register` is the order `setup` runs them,
+    and each step naming the next is what makes that order discoverable
+    without reading `setup`'s source. Silent once a config exists: advice to
+    do something already done is noise, and registration is the one genuinely
+    optional step, so nagging about it would be wrong.
+    """
+    for name in DEFAULT_TARGETS:
+        relative = target_named(name).relative_path
+        if relative and (target_dir / relative).is_file():
+            return
+    display.next_step("boepie register")
+
+
+def _require_initialised(target_dir: Path, *, corpus: bool = True) -> None:
+    """Refuse a workspace nothing has initialised, naming `boepie init`.
+
+    The whole point of splitting `init` from `sync`: scaffolding is one
+    explicit act, so everything else can assume it happened and say so when
+    it did not. Before this, four commands each answered "is this ready" for
+    themselves and answered differently - `sync` created a bundle, `corpus
+    sync` created its directories by writing into them, `setup._index_plan`
+    had four answers and `corpus status` a fifth - and none of them could be
+    told to stop.
+    """
+    if not (target_dir / ".boepie").is_dir():
+        raise CliError(
+            f"no context bundle at {target_dir}. "
+            f"Run {display.command('boepie init')} first."
+        )
+    if corpus:
+        _require_corpus(_SYNC_COLLECTIONS)
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -2597,11 +3000,11 @@ def _index_plan(collection: str) -> tuple[IndexAction, str]:
     except (OSError, ValueError, CliError):
         documents = 0
     if not documents:
-        return "empty", "no documents yet"
+        return "empty", "no documents"
 
     manifest = _active_index_manifest(collection)
     if manifest is None:
-        return "build", f"{documents} document(s), no index yet"
+        return "build", f"{_plural(documents, 'document')}, no index yet"
 
     freshness = index_freshness(manifest.get("built_from"), collection)
     if freshness.state == "stale":
@@ -2613,136 +3016,390 @@ def _index_plan(collection: str) -> tuple[IndexAction, str]:
             )
             if part
         )
-        return "rebuild", f"stale - {counts}"
+        return "rebuild", f"{counts} of {_plural(freshness.document_count, 'document')}"
     if freshness.added:
-        return "rebuild", f"{freshness.added} new document(s)"
+        return (
+            "rebuild",
+            f"{freshness.added} of "
+            f"{_plural(freshness.document_count, 'document')} added",
+        )
     if freshness.state == "unrecorded":
         return "rebuild", "built before the freshness check existed"
     if freshness.state == "corpus absent":
         return "keep", "corpus not on this machine"
-    return "keep", f"in step with its corpus ({freshness.document_count} document(s))"
+    return "keep", f"{_plural(freshness.document_count, 'document')}, current"
 
 
-def _setup_index(collection: str) -> None:
-    """Build one collection's index during setup, or say why it was not."""
-    action, reason = _index_plan(collection)
-    if action in ("keep", "empty"):
-        display.muted(reason, lead=_status_label(collection), indent="  ")
-        return
-    verb = "building" if action == "build" else "rebuilding"
-    display.info(f"{verb} - {reason}", lead=_status_label(collection), indent="  ")
-    _build_synced_index(collection, indent=_STATUS_VALUE_INDENT)
+def _report_mcp_targets(
+    results: list[TargetResult], directory: Path, command: list[str]
+) -> None:
+    """One line for the whole registration, then the files it wrote.
+
+    Collapsed rather than one line per agent because the interesting facts
+    are which agents can now launch boepie and which files carry that - and
+    two agents routinely share one file, which a per-agent listing has to
+    explain away ("same file as claude") instead of just showing two names
+    against one path. A failure still gets its own diagnostic: it is the one
+    case where the agent's name is the point.
+    """
+    registered = [result.name for result in results if result.status == "written"]
+    current = [result.name for result in results if result.status == "current"]
+    working = sorted(registered + current)
+    if working:
+        aside = "" if registered else " - already current"
+        display.operation("Registered", f"boepie with {', '.join(working)}{aside}")
+        written = sorted(
+            {
+                _relative_to(result.path, directory)
+                for result in results
+                if result.status == "written" and result.path is not None
+            }
+        )
+        display.details("+", written)
+
+    # An agent that was *asked for* and is not installed is still reported.
+    # This is not the "here is every agent boepie knows and did not touch"
+    # block that used to close every run - that was help text. This is the
+    # answer to a question the user asked by naming the agent, and without it
+    # the report would claim boepie set up something it did not.
+    for result in results:
+        if result.status == "skipped":
+            display.operation(
+                "Skipped", f"{result.name} - {result.detail}", style="muted"
+            )
+
+    failed = [result for result in results if result.status == "failed"]
+    for result in failed:
+        display.note(f"could not register {result.name}: {result.detail}")
+    if failed:
+        # The paste-in definition used to close *every* run, alongside a list
+        # of every agent boepie knows and did not touch - help text in the
+        # middle of a report. Here it is the answer to a question the reader
+        # now actually has, so it appears only when boepie could not do the
+        # job itself.
+        display.hint("register it by hand with:")
+        console.print(manual_definition(command))
 
 
-def _report_mcp_target(result: TargetResult) -> None:
-    where = str(result.path) if result.path is not None else result.detail
-    if result.status == "written":
-        display.success(f"{result.name} -> {where}", lead="registered", indent="  ")
-    elif result.status == "current":
-        aside = result.detail or "already correct"
-        display.muted(f"{result.name} -> {where} ({aside})", indent="  ")
-    elif result.status == "skipped":
-        display.muted(f"{result.name} - {result.detail}", lead="skipped", indent="  ")
-    else:
-        display.warning(f"{result.name} - {result.detail}", lead="failed", indent="  ")
-
-
-@cli.command()
-@click.option(
+_DIRECTORY_OPTION = click.option(
     "--directory",
     type=click.Path(exists=True, file_okay=False, path_type=str),
     default=".",
     show_default=True,
-    help="The workspace to set up.",
+    help="The workspace to act on.",
 )
-@click.option(
+_AGENTS_OPTION = click.option(
     "--agents",
     default=",".join(DEFAULT_TARGETS),
     show_default=True,
     type=CollectionList(TARGET_NAMES),
-    help="Comma-separated agents to register the server with, or 'all'. "
-    "The default is every agent whose config stays inside the workspace; "
-    "codex and gemini change user-level config through their own CLIs.",
+    help="Comma-separated agents, or 'all'. The default is every agent whose "
+    "config stays inside the workspace; codex and gemini change user-level "
+    "config through their own CLIs.",
 )
-@click.option(
-    "--no-corpus",
-    is_flag=True,
-    help="Leave the machine-global literature/docs corpora alone. The first "
-    "fetch takes minutes.",
-)
-@click.option(
+_FORCE_OPTION = click.option(
     "--force",
     is_flag=True,
     help="Replace an existing boepie entry in an agent's config.",
 )
+
+
+@cli.command()
+@_DIRECTORY_OPTION
+@click.pass_context
+def init(ctx: click.Context, directory: str) -> None:
+    """Scaffold a workspace: the context bundle and this machine's corpora.
+
+    Fast, offline and idempotent - nothing is fetched, nothing is embedded
+    and no agent is touched. `boepie sync` fills what this creates, `boepie
+    register` points an agent at it, and `boepie setup` runs all three.
+
+    \b
+    context   The `.boepie/` bundle in --directory, created if absent. An
+              existing one is reported and left alone: converging it is
+              `context sync`'s job, not a scaffold's.
+    corpus    The machine-global literature, docs and notes directories.
+              **Shared by every workspace**, so the second project on a
+              machine finds them already made rather than getting its own.
+    """
+    target_dir = Path(directory).resolve()
+
+    # The whole block, because `context init` closes by naming `context
+    # index` - which is a step this command takes two lines later.
+    with display.following_steps(False):
+        if (target_dir / ".boepie").is_dir():
+            display.operation(
+                "Checked",
+                f"bundle at {_relative_to(target_dir / '.boepie', target_dir)}",
+                style="muted",
+            )
+        else:
+            ctx.invoke(context_init, directory=directory, skills=False, hooks=False)
+
+        ctx.invoke(corpus_init, collections=_CORPUS_COLLECTIONS)
+        # The bundle ships with content, so unlike the empty corpus
+        # directories it has something to index the moment it exists.
+        # `context init` leaves that to its own verb; the composite closes
+        # the gap.
+        ctx.invoke(context_index, directory=directory, check_only=False)
+    display.next_step("boepie sync")
+
+
+@cli.command()
+@_DIRECTORY_OPTION
+@_AGENTS_OPTION
+@_FORCE_OPTION
+@click.option(
+    "--check-only",
+    "check_only",
+    is_flag=True,
+    help="Report what each agent's config holds and change nothing. "
+    "Exits non-zero if any selected agent is unregistered or stale.",
+)
+def register(
+    directory: str, agents: tuple[str, ...], force: bool, check_only: bool
+) -> None:
+    """Point an agent at this boepie, or check that one already is.
+
+    Its own command rather than a phase of `init` because it is the one part
+    of setting up a workspace that is genuinely optional - you may want the
+    bundle and the corpora without changing any agent's configuration - and
+    because "is my agent pointed at the right boepie" is a question worth
+    being able to ask on its own.
+
+    The command written into each config is an absolute path to **this**
+    installation's console script, and that is the whole point of the step:
+    boepie's pipeline tools drive stimela's configuration chain in-process,
+    so the server has to run in the venv stimela is installed in. A boepie
+    installed as an isolated tool starts cleanly and then sees zero cabs,
+    which is exactly the failure `--check` is for - the agent lists no
+    boepie tools and explains nothing.
+    """
+    target_dir = Path(directory).resolve()
+    command = server_command()
+
+    # The venv, first, because "is this the boepie that lives beside stimela"
+    # is the single thing most likely to be wrong and every line below is
+    # worthless if it is - and because this is the command that *commits* to
+    # that venv by writing its path into every agent config. `init` and
+    # `sync` print no such line: neither changes a registration, so naming
+    # the environment there would be ceremony. uv draws the same
+    # distinction, printing `Using CPython 3.14.3` when it creates a venv and
+    # nothing when it reuses one.
+    display.using(f"boepie {__version__} ({command[0]})")
+
+    if check_only:
+        _report_registrations(target_dir, agents, command)
+        return
+    _register_agents(target_dir, agents, command, force=force)
+
+
+# How each inspected state reads, and whether it means something is wrong.
+# `opaque` is not a fault: codex and gemini can be asked whether they know
+# the server but not what they would launch, and calling that `current`
+# would be the same unfounded claim `--check` exists to catch.
+_REGISTRATION_WORDING: dict[str, tuple[str, str]] = {
+    "current": ("registered, and points at this boepie", "success"),
+    "opaque": ("registered - its CLI does not say with which boepie", "muted"),
+    "absent": ("not installed", "muted"),
+    "missing": ("not registered", "warning"),
+    "stale": ("registered, but points somewhere else", "warning"),
+}
+_REGISTRATION_FAULTS = frozenset({"missing", "stale"})
+
+
+def _report_registrations(
+    target_dir: Path, agents: tuple[str, ...], command: list[str]
+) -> None:
+    """Describe each agent's registration - state, not a sequence of steps.
+
+    So it is the aligned `label:` column the status commands use, not the
+    operation lines: nothing was done here, and writing `Checked` against every
+    row would claim an action where there was only a look.
+    """
+    faults: list[str] = []
+    stale = False
+    for position, name in enumerate(agents):
+        inspection = inspect_target(name, target_dir, command)
+        wording, style = _REGISTRATION_WORDING[inspection.state]
+        if position:
+            console.print()
+        console.print(
+            display.collection_root(name, inspection.path or "(no file)"),
+            soft_wrap=True,
+        )
+        writer = {
+            "success": display.success,
+            "warning": display.warning,
+            "muted": display.muted,
+        }[style]
+        sentence = wording + (f" - {inspection.detail}" if inspection.detail else "")
+        # Wrapped into the value column rather than left to rich, which
+        # restarts every continuation at column zero where it collides with
+        # the next heading and the block stops reading as one value.
+        head, *rest = _wrap_into_value_column([sentence])
+        writer(head, lead=_status_label("state"), indent="  ")
+        for line in rest:
+            display.info(line, indent=_STATUS_VALUE_INDENT)
+        if inspection.registered_command:
+            # The command it would actually launch, so a stale entry names
+            # the venv it points at instead of only saying that it is wrong.
+            display.muted(
+                " ".join(inspection.registered_command),
+                lead=_status_label("launches"),
+                indent="  ",
+            )
+        if inspection.state in _REGISTRATION_FAULTS:
+            faults.append(name)
+            stale = stale or inspection.state == "stale"
+
+    if faults:
+        # `--force` when anything is *stale*: `register` on its own leaves an
+        # entry that is already there, so naming the bare command would send
+        # the reader to something that reports `skipped` and changes nothing.
+        fix = "boepie register --force" if stale else "boepie register"
+        # Non-zero so `--check` is usable as a precondition in a script, the
+        # way `black --check` or `terraform plan -detailed-exitcode` are.
+        raise CliError(
+            f"{_plural(len(faults), 'agent')} not pointed at this boepie: "
+            f"{', '.join(faults)}. Run {display.command(fix)}."
+        )
+
+
+@cli.command("index")
+@_DIRECTORY_OPTION
+@embedding_options
+@click.option(
+    "--embedding-concurrency",
+    default=None,
+    type=int,
+    help="Max concurrent embedding requests (default: 4). Lower this if you're "
+    "hitting API rate limits.",
+)
+@click.option(
+    "--check-only",
+    "check_only",
+    is_flag=True,
+    help="Report every index's state and path and build nothing. "
+    "Exits non-zero if any is missing or stale.",
+)
+@click.option("-v", "--verbose", is_flag=True, help="Show per-batch progress logging.")
+@click.pass_context
+def index(
+    ctx: click.Context,
+    directory: str,
+    resolve_embedding,
+    embedding_concurrency: int | None,
+    check_only: bool,
+    verbose: bool,
+) -> None:
+    """Rebuild every index: `corpus index` then `context index`.
+
+    The composite for the two indexing verbs, as `boepie sync` is for the two
+    converging ones. It adds nothing of its own - name a collection with
+    `boepie corpus index -l` when you want one.
+
+    **`boepie sync` is not this command.** Sync converges first and then
+    rebuilds only what changed; this rebuilds unconditionally and fetches
+    nothing, which is what a change of embedding backend or model needs -
+    the corpus has not moved, but every vector in it has to be recomputed.
+
+    The embedding options reach the corpus leg only. The bundle's index is
+    BM25-only by nature (no backend, no model), so there is nothing for them
+    to apply to there.
+    """
+    # `embedding_options` is a decorator that turns four `--embedding-*`
+    # options into a `resolve_embedding` callable, and it wraps `corpus_index`
+    # too - so that leg wants the four values, not an already-resolved
+    # binding, which would collide with the one it builds for itself.
+    # Resolving here and taking the pieces back off works however this
+    # command was reached; reading `ctx.params` did not, because a
+    # programmatic `ctx.invoke` builds a fresh context whose params are empty.
+    binding = resolve_embedding()
+    embedding_params = {
+        "embedding_binding": binding.kind,
+        "embedding_model": binding.model,
+        "embedding_host": binding.host,
+        "embedding_dim": binding.dim,
+    }
+    if check_only:
+        bundle_dir = _require_bundle(Path(directory).resolve())
+        wrong = _report_index_states(
+            [(name, INDEX_DIR) for name in _CORPUS_COLLECTIONS]
+        ) + _report_index_states(
+            [(_CONTEXT_COLLECTION, index_root_for(bundle_dir))], first=False
+        )
+        if wrong:
+            raise _unusable_indices_error(wrong)
+        return
+
+    ctx.invoke(
+        corpus_index,
+        collections=_CORPUS_COLLECTIONS,
+        shorthand=None,
+        embedding_concurrency=embedding_concurrency,
+        index_name=None,
+        check_only=False,
+        verbose=verbose,
+        **embedding_params,
+    )
+    console.print()
+    ctx.invoke(context_index, directory=directory, check_only=False)
+    _suggest_registration(Path(directory).resolve())
+
+
+@cli.command()
+@_DIRECTORY_OPTION
+@_AGENTS_OPTION
+@_FORCE_OPTION
+@click.option("-v", "--verbose", is_flag=True, help="Show progress per item.")
 @click.pass_context
 def setup(
     ctx: click.Context,
     directory: str,
     agents: tuple[str, ...],
-    no_corpus: bool,
     force: bool,
+    verbose: bool,
 ) -> None:
-    """Set up a workspace: context bundle, corpora, indices, MCP launch files.
+    """Scaffold a workspace, fill it, and register it: init, sync, register.
 
     The one command between installing boepie and having an agent that can
     use it, and safe to repeat - every step converges rather than starting
-    over.
-
-    \b
-    context   The `.boepie/` bundle in --directory: created if absent,
-              otherwise converged, from the content in this venv - nothing
-              is downloaded. Only `managed_by: boepie` files are rewritten;
-              anything you wrote is left byte-for-byte.
-    corpus    The machine-global literature and docs corpora, reconciled
-              against boepie's packaged manifests. A `managed_by: user`
-              document is never touched, and a document already converted is
-              skipped, so a second run costs only what is new.
-    index     Built where there is no index, rebuilt where the corpus has
-              moved under one, kept where it is already in step.
-    agents    The MCP server registration, for each agent actually installed.
-
-    The command written into each config is an absolute path to **this**
-    installation's console script, which is what makes the server able to
-    see stimela: boepie has to be installed in the same venv as stimela, and
-    the config has to name that venv rather than whichever boepie a PATH
-    lookup would find.
+    over. It adds nothing of its own, so run the three separately whenever
+    you want one without the others: `init` alone touches no network, and
+    `register` alone changes no content.
     """
-    target_dir = Path(directory).resolve()
+    ctx.invoke(init, directory=directory)
+    with display.following_steps(False):
+        ctx.invoke(sync, directory=directory, verbose=verbose)
+        # `sync` reports index drift and stops; `setup` is the command that
+        # closes that gap, the same way it closes the one between `corpus
+        # sync` and `corpus index`.
+        ctx.invoke(index, directory=directory, check_only=False, verbose=verbose)
+    ctx.invoke(
+        register, directory=directory, agents=agents, force=force, check_only=False
+    )
 
-    display.heading("context")
-    if (target_dir / ".boepie").exists():
-        ctx.invoke(apply, directory=directory)
-    else:
-        ctx.invoke(init, directory=directory, skills=False, hooks=False)
 
-    if not no_corpus:
-        display.heading("corpus", indent="\n")
-        # `corpus fetch` closes by advising `index build`, which is the very
-        # next phase here - once per collection.
-        with display.following_steps(False):
-            _sync_network_step(
-                ctx,
-                corpus_fetch,
-                f"corpus fetch --collection {','.join(_SYNC_COLLECTIONS)}",
-                False,
-                collections=_SYNC_COLLECTIONS,
-                force_targets=(),
-                delay=None,
-                verbose=False,
-            )
 
-    display.heading("index", indent="\n")
-    for collection in _SYNC_COLLECTIONS:
-        _setup_index(collection)
+def _register_agents(
+    target_dir: Path,
+    agents: tuple[str, ...],
+    command: list[str],
+    *,
+    force: bool,
+) -> None:
+    """Write the MCP launch config for each agent asked for.
 
-    display.heading("agents", indent="\n")
-    command = server_command()
-    display.muted(" ".join(command), lead=_status_label("command"), indent="  ")
+    Scaffolding rather than convergence - fast, offline, per-workspace - so
+    it belongs to `init` and never runs in `sync`, which changes no
+    registration.
+    """
     # Two agents can read one file - Claude Code and Copilot CLI both take
     # `.mcp.json` - so the second is reported as already covered rather than
     # written a second time.
     written_by: dict[Path, str] = {}
+    results: list[TargetResult] = []
     for name in agents:
         try:
             result = apply_target(name, target_dir, command, force=force)
@@ -2756,23 +3413,22 @@ def setup(
         shared = target_named(name).relative_path
         path = target_dir / shared if shared else None
         if path is not None and path in written_by and result.status != "failed":
-            result = TargetResult(
-                name, "current", path, f"same file as {written_by[path]}"
-            )
+            result = TargetResult(name, "current", path, "")
         elif path is not None and result.status in ("written", "current"):
             written_by[path] = name
-        _report_mcp_target(result)
+        # An agent's own CLI reports the command it ran, not the file it
+        # wrote, so the result carries no path and the detail lines would
+        # silently omit the very file that was created. The target declares
+        # where it writes, so fill it in here.
+        if result.path is None and path is not None and result.status == "written":
+            result = TargetResult(result.name, result.status, path, result.detail)
+        results.append(result)
+    _report_mcp_targets(results, target_dir, command)
 
-    uncovered = [name for name in TARGET_NAMES if name not in agents]
-    if uncovered:
-        display.muted("not registered:", indent="\n")
-        for name in uncovered:
-            display.muted(f"{name} - {target_named(name).note}", indent="  ")
-        display.muted(
-            "Add one with --agents, or paste this into any agent boepie "
-            "does not know:"
-        )
-        console.print(manual_definition(command))
+    # Nothing is said about the agents that were not asked for. Listing every
+    # target boepie knows, with a JSON definition to paste, made the tail of
+    # a successful run longer than the run itself - and it is help text, not
+    # a report of what happened. `--agents` and `--help` carry it instead.
 
 
 # ---------------------------------------------------------------------------
@@ -2854,7 +3510,7 @@ async def _hint_search(prompt: str, collections: tuple[str, ...]) -> None:
         if len(snippet) > 120:
             snippet = snippet[:120]
         section_part = f"#{chunk.section}" if chunk.section else ""
-        display.hint(f"{chunk.document_id}{section_part}", snippet)
+        display.hint_coordinate(f"{chunk.document_id}{section_part}", snippet)
 
 
 # ---------------------------------------------------------------------------
@@ -2882,10 +3538,24 @@ def _check_known_key(key: str) -> None:
         )
 
 
-_MISSING_FILE_HINT = (
-    "No config file yet - boepie is running on built-in defaults. "
-    "Run 'boepie config create' to write one."
-)
+# A diagnostic rather than a remark, because running on built-in defaults is
+# not what someone reading `config show` expects to be told in passing: a
+# commented line inside the TOML block reads as part of the config, not as an
+# answer to "why is none of this in my file". Lowercase and without the
+# command, which `next_step` supplies in boepie's usual shape.
+_MISSING_FILE_HINT = "no config file yet - boepie is running on built-in defaults"
+
+
+def _warn_no_config_file() -> None:
+    """Say that nothing on disk backs what was just printed.
+
+    Always *after* the output it is about, on stderr. Both callers print a
+    payload first - `config show` a whole file's worth - and a terminal
+    leaves the reader at the bottom, so a diagnostic that goes first is the
+    one part of the run they have to scroll back for.
+    """
+    display.note(_MISSING_FILE_HINT, stderr=True)
+    display.next_step("boepie config init", stderr=True)
 
 
 @cli.group()
@@ -2893,14 +3563,14 @@ def config() -> None:
     """Manage the user config file (~/.config/boepie/config.toml)."""
 
 
-@config.command("create")
+@config.command("init")
 @click.option(
     "-f",
     "--force",
     is_flag=True,
     help="Overwrite an existing config file, discarding whatever it holds.",
 )
-def config_create_cmd(force: bool) -> None:
+def config_init_cmd(force: bool) -> None:
     """Write a fresh config file with every setting at its built-in default.
 
     The file is a full reference: each key is present, commented with what it
@@ -2925,9 +3595,9 @@ def config_create_cmd(force: bool) -> None:
 @config.command("path")
 def config_path_cmd() -> None:
     """Print the config file's path (it may not exist yet)."""
-    if not settings.config_file_exists():
-        display.warning(_MISSING_FILE_HINT, lead="Warning:")
     display.path(settings.config_path())
+    if not settings.config_file_exists():
+        _warn_no_config_file()
 
 
 @config.command("show")
@@ -2945,14 +3615,11 @@ def config_show(sources: bool) -> None:
     which layer actually supplied each one.
     """
     resolved = settings.resolve_settings()
-    file_exists = settings.config_file_exists()
 
     lines: list[str] = []
     if sources:
         lines.append("# Resolved config: env var > config file > built-in default.")
         lines.append(f"# Config file: {settings.config_path()}")
-        if not file_exists:
-            lines.append(f"# {_MISSING_FILE_HINT}")
 
     current_section = ""
     for setting in resolved:
@@ -2969,6 +3636,18 @@ def config_show(sources: bool) -> None:
         lines.append(f"{name} = {rendered}{annotation}")
 
     display.toml("\n".join(lines).strip())
+
+    if not settings.config_file_exists():
+        # After the payload, not before it: this is forty-odd lines of TOML,
+        # so a warning at the top is scrolled off by its own output and the
+        # terminal leaves the reader at the bottom. Last is where it is read.
+        #
+        # On stderr, and outside the `--sources` guard. This is a fact about
+        # the run rather than an annotation on a value, so `--no-sources`
+        # must not hide it - and stdout here is valid TOML by design (see
+        # `display.toml`), so a warning printed into it would land in
+        # whatever file the output was redirected to.
+        _warn_no_config_file()
 
 
 @config.command("get")
@@ -3008,7 +3687,8 @@ def config_set(key: str, value: str) -> None:
     if created:
         display.info(
             "Created that file with this key only. "
-            "'boepie config create' would instead write every key at its default."
+            f"{display.command('boepie config init')} would instead write "
+            f"every key at its default."
         )
 
     # The write has already succeeded; an env var shadowing it is worth
@@ -3016,9 +3696,7 @@ def config_set(key: str, value: str) -> None:
     # keys happens to trip on something unrelated.
     env_var = settings.env_var_for(key)
     if env_var in os.environ:
-        display.warning(
-            f"{env_var} is set in your environment and "
-            f"overrides the file, so {key} still resolves to "
-            f"{settings.get(key)!r}.",
-            lead="Note:",
+        display.note(
+            f"{env_var} is set in your environment and overrides the file, "
+            f"so {key} still resolves to {settings.get(key)!r}."
         )

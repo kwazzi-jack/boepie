@@ -258,7 +258,7 @@ async def test_search_literature_no_index_reports_one_line_error_naming_a_comman
     )
     assert text.startswith("Error:")
     assert len(text.splitlines()) == 1
-    assert "boepie index build --collection literature" in text
+    assert "boepie corpus index --collection literature" in text
 
 
 async def test_search_literature_top_k_upper_bound_is_twenty(

@@ -10,7 +10,7 @@ silently, with plausible-looking scores.
 The distinction the whole design turns on: a document that **changed or went
 away** makes the index wrong, while a document that is merely **new** makes it
 incomplete. Only the first is an error. The second is the ordinary state
-between a `corpus add` and the `index build` that follows it, and failing
+between a `corpus add` and the `corpus index` that follows it, and failing
 there would break search for the entire staging workflow those two commands
 were split apart to support.
 """
@@ -100,7 +100,7 @@ async def test_a_deleted_document_makes_the_index_stale(corpus: Path, tmp_path: 
 async def test_a_new_document_leaves_the_index_merely_incomplete(
     corpus: Path, tmp_path: Path
 ):
-    """`corpus add` then search, before `index build` catches up. The new note
+    """`corpus add` then search, before `corpus index` catches up. The new note
     will not be found, which is expected; everything else must keep working."""
     await _build(corpus, tmp_path / "index")
     write_corpus_document(
@@ -124,7 +124,7 @@ async def test_the_error_names_the_command_that_fixes_it(corpus: Path, tmp_path:
     with pytest.raises(StaleIndexError) as error:
         await _load(tmp_path / "index")
 
-    assert "boepie index build --collection notes" in str(error.value)
+    assert "boepie corpus index --collection notes" in str(error.value)
 
 
 async def test_an_absent_corpus_is_not_evidence_of_staleness(
@@ -226,20 +226,20 @@ def test_index_status_names_a_stale_index_and_its_fix(runner, indexed: Path) -> 
     from boepie import cli
 
     _make_stale(indexed)
-    result = runner.invoke(cli.cli, ["index", "status"])
+    result = runner.invoke(cli.cli, ["corpus", "status", "--collection", "notes"])
     output = _plain(result.output)
 
     assert result.exit_code == 0
     assert "stale" in output
-    assert "boepie index build --collection notes" in output
+    assert "boepie corpus index --collection notes" in output
 
 
 def test_index_status_says_so_when_the_index_is_in_step(runner, indexed: Path) -> None:
     from boepie import cli
 
-    result = runner.invoke(cli.cli, ["index", "status"])
+    result = runner.invoke(cli.cli, ["corpus", "status", "--collection", "notes"])
 
-    assert "in step" in _plain(result.output)
+    assert "current" in _plain(result.output)
 
 
 def test_a_sweep_does_not_quietly_drop_a_stale_collection(

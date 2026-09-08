@@ -269,7 +269,7 @@ async def test_search_context_without_any_bundle_says_init(tmp_path, monkeypatch
         assert len(result.splitlines()) == 1
         # The fix clause must name a command that really exists.
         assert "boepie context init" in result
-        assert "boepie context apply" not in result
+        assert "boepie context sync" not in result
     finally:
         await engine.clear_cache()
 
@@ -286,7 +286,7 @@ async def test_search_context_with_bundle_but_no_index_says_apply(tmp_path, monk
         result = await search_context(SearchContextInput(question="anything"))
         assert result.startswith("Error:")
         assert len(result.splitlines()) == 1
-        assert "boepie context apply" in result
+        assert "boepie context sync" in result
     finally:
         await engine.clear_cache()
 

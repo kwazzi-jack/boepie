@@ -67,7 +67,7 @@ def list_cabs(pattern: str | None = None) -> str:
     if not all_cabs:
         return (
             f"Error: no cab definitions found in the configured stimela sources "
-            f"({describe_sources()}). Check 'boepie config get pipeline.sources'."
+            f"({describe_sources()}). Check `boepie config get pipeline.sources`."
         )
 
     if pattern:

@@ -395,10 +395,51 @@ def sync_docs_project(
             else None
         )
 
-        for page in iter_project_pages(client, project, delay=delay, timeout=timeout):
+        def already_held(docname: str) -> bool:
+            """Whether this page is on disk and nothing has asked for it again.
+
+            Answered *before* the page is requested. The skip below has always
+            been right about what to write; it just decided after the page had
+            been downloaded and converted, so a second `corpus sync` re-pulled
+            all 98 pages and discarded every one. A `managed_by: user` page
+            counts as held too - reconcile never touches one, so fetching it
+            could only produce markdown to throw away.
+            """
+            existing = existing_by_key.get(f"{project.project}/{docname}")
+            return existing is not None and f"{project.project}/{docname}" not in (
+                forced_natural_keys
+            )
+
+        for page in iter_project_pages(
+            client, project, delay=delay, timeout=timeout, have_page=already_held
+        ):
             natural_key = f"{project.project}/{page.docname}"
             seen_natural_keys.add(natural_key)
             existing_doc = existing_by_key.get(natural_key)
+
+            if page.not_fetched:
+                # Enumerated and left alone. Counted exactly as it would have
+                # been had it been downloaded first, so the report is
+                # unchanged - only the traffic is.
+                if (
+                    existing_doc is not None
+                    and existing_doc.frontmatter.get("managed_by") == "user"
+                ):
+                    yours += 1
+                    action = "yours"
+                else:
+                    skipped += 1
+                    action = "skipped"
+                if on_page is not None:
+                    on_page(
+                        DocsPageSyncResult(
+                            project=project.project,
+                            page=page.docname,
+                            action=action,
+                            id=existing_doc.id if existing_doc else None,
+                        )
+                    )
+                continue
 
             if page.markdown is None:
                 failures.append(

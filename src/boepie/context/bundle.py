@@ -200,7 +200,7 @@ def _read_manifest(bundle_dir: Path) -> BundleManifest:
     """The bundle's own manifest, or an error naming the command that fixes it.
 
     Three ways this file can be unusable, and all three end the same way -
-    named, with `boepie context apply` beside them, because `apply` writes
+    named, with `boepie context sync` beside them, because `apply` writes
     the manifest rather than reading it and so fixes every one of them.
     - **Unparseable**, from a write interrupted partway. `json`'s own error
       names a column and nothing else: not the file, not the bundle, not the
@@ -229,12 +229,12 @@ def _read_manifest(bundle_dir: Path) -> BundleManifest:
     except json.JSONDecodeError as error:
         raise ValueError(
             f"The manifest at {manifest_path} is not readable JSON ({error}). "
-            f"Run `boepie context apply` to rewrite it."
+            f"Run `boepie context sync` to rewrite it."
         ) from error
     if not isinstance(manifest_data, dict):
         raise ValueError(
             f"The manifest at {manifest_path} is not a JSON object. "
-            f"Run `boepie context apply` to rewrite it."
+            f"Run `boepie context sync` to rewrite it."
         )
     try:
         return BundleManifest(**manifest_data)
@@ -243,7 +243,7 @@ def _read_manifest(bundle_dir: Path) -> BundleManifest:
         raise ValueError(
             f"The bundle at {bundle_dir} was written by an older boepie "
             f"(bundle_version {recorded_version}, this one writes "
-            f"{_BUNDLE_VERSION}). Run `boepie context apply` to rewrite it."
+            f"{_BUNDLE_VERSION}). Run `boepie context sync` to rewrite it."
         ) from error
 
 
@@ -412,7 +412,7 @@ def init_bundle(target_dir: Path) -> BundleManifest:
     bundle_dir = target_dir / _BUNDLE_DIRNAME
     if bundle_dir.exists():
         raise FileExistsError(
-            f"Bundle already exists at {bundle_dir}. Use `boepie context apply` instead."
+            f"Bundle already exists at {bundle_dir}. Use `boepie context sync` instead."
         )
 
     source_dir = context_content_dir()
@@ -612,7 +612,7 @@ def bundle_status(target_dir: Path) -> BundleStatus:
         mismatches.append(
             f"content_sha256 {manifest.content_sha256[:12]} != installed "
             f"{installed_content_sha256[:12]}: bundle behind the content this "
-            "boepie ships: run `boepie context apply`"
+            "boepie ships: run `boepie context sync`"
         )
 
     if mismatches:

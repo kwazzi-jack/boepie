@@ -8,6 +8,7 @@ change a result.
 
 from __future__ import annotations
 
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -31,14 +32,14 @@ def _isolated_config_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pat
 
 
 # ---------------------------------------------------------------------------
-# config create
+# config init
 # ---------------------------------------------------------------------------
 
 
 def test_config_create_writes_a_full_default_file(
     runner: CliRunner, _isolated_config_dir: Path
 ) -> None:
-    result = runner.invoke(cli.cli, ["config", "create"])
+    result = runner.invoke(cli.cli, ["config", "init"])
 
     assert result.exit_code == 0, result.output
     config_file = _isolated_config_dir / "config.toml"
@@ -49,10 +50,10 @@ def test_config_create_writes_a_full_default_file(
 
 
 def test_config_create_refuses_an_existing_file(runner: CliRunner) -> None:
-    runner.invoke(cli.cli, ["config", "create"])
+    runner.invoke(cli.cli, ["config", "init"])
     settings.set_value("embedding.binding", "ollama")
 
-    result = runner.invoke(cli.cli, ["config", "create"])
+    result = runner.invoke(cli.cli, ["config", "init"])
 
     assert result.exit_code != 0
     assert "--force" in result.output
@@ -61,10 +62,10 @@ def test_config_create_refuses_an_existing_file(runner: CliRunner) -> None:
 
 
 def test_config_create_force_overwrites(runner: CliRunner) -> None:
-    runner.invoke(cli.cli, ["config", "create"])
+    runner.invoke(cli.cli, ["config", "init"])
     settings.set_value("embedding.binding", "ollama")
 
-    result = runner.invoke(cli.cli, ["config", "create", "--force"])
+    result = runner.invoke(cli.cli, ["config", "init", "--force"])
 
     assert result.exit_code == 0, result.output
     assert settings.get("embedding.binding") == "fastembed"
@@ -75,7 +76,7 @@ def test_config_create_output_does_not_change_resolved_settings(runner: CliRunne
     defaults explicit."""
     before = settings.load().model_dump()
 
-    result = runner.invoke(cli.cli, ["config", "create"])
+    result = runner.invoke(cli.cli, ["config", "init"])
 
     assert result.exit_code == 0, result.output
     assert settings.load().model_dump() == before
@@ -99,16 +100,16 @@ def test_config_path_warns_when_the_file_does_not_exist(runner: CliRunner) -> No
     result = runner.invoke(cli.cli, ["config", "path"])
 
     assert result.exit_code == 0, result.output
-    assert "No config file yet" in result.output
-    assert "boepie config create" in result.output
+    assert "warning: no config file yet" in result.output
+    assert "hint: run `boepie config init`" in result.output
 
 
 def test_config_path_does_not_warn_once_the_file_exists(runner: CliRunner) -> None:
-    runner.invoke(cli.cli, ["config", "create"])
+    runner.invoke(cli.cli, ["config", "init"])
 
     result = runner.invoke(cli.cli, ["config", "path"])
 
-    assert "No config file yet" not in result.output
+    assert "no config file yet" not in result.output
 
 
 # ---------------------------------------------------------------------------
@@ -127,14 +128,64 @@ def test_config_show_prints_section_headers_and_defaults(runner: CliRunner) -> N
     assert 'binding = "fastembed"' in result.output
 
 
-def test_config_show_says_when_no_file_backs_the_values(runner: CliRunner) -> None:
+def test_config_show_warns_when_no_file_backs_the_values(runner: CliRunner) -> None:
     """The complaint this answers: `config show` printing a full config gives
-    no hint that nothing on disk backs it."""
+    no hint that nothing on disk backs it.
+
+    A `warning:`, not a commented line inside the TOML: a comment among the
+    settings reads as part of the config rather than as an answer to "why is
+    none of this in my file".
+    """
     result = runner.invoke(cli.cli, ["config", "show"])
 
     assert result.exit_code == 0, result.output
-    assert "No config file yet" in result.output
-    assert "# default" in result.output
+    assert "warning: no config file yet" in result.stderr
+    assert "hint: run `boepie config init`" in result.stderr
+    assert "# default" in result.stdout
+
+
+def test_config_show_warns_after_the_settings_not_before_them(
+    runner: CliRunner,
+) -> None:
+    """`config show` prints forty-odd lines, so a warning at the top is
+    scrolled off by its own output. A terminal leaves the reader at the
+    bottom, which is where the one line they have to act on belongs."""
+    result = runner.invoke(cli.cli, ["config", "show"])
+
+    assert result.exit_code == 0, result.output
+    combined = result.output
+    assert combined.index("[instructions]") < combined.index("warning: no config file")
+
+
+def test_config_show_keeps_the_warning_out_of_its_toml(runner: CliRunner) -> None:
+    """stdout here is valid TOML by design, so `boepie config show >
+    config.toml` has to stay parseable on a machine with no config file -
+    which is exactly the machine most likely to run it."""
+    result = runner.invoke(cli.cli, ["config", "show"])
+
+    assert result.exit_code == 0, result.output
+    assert "warning:" not in result.stdout
+    assert "hint:" not in result.stdout
+    assert tomllib.loads(result.stdout)["embedding"]["binding"] == "fastembed"
+
+
+def test_config_show_no_sources_still_warns(runner: CliRunner) -> None:
+    """`--sources` annotates where each value came from; whether a file backs
+    any of them is a fact about the run, so turning the annotations off must
+    not turn it off too."""
+    result = runner.invoke(cli.cli, ["config", "show", "--no-sources"])
+
+    assert result.exit_code == 0, result.output
+    assert "warning: no config file yet" in result.stderr
+    assert "#" not in result.stdout
+
+
+def test_config_show_does_not_warn_once_the_file_exists(runner: CliRunner) -> None:
+    runner.invoke(cli.cli, ["config", "init"])
+
+    result = runner.invoke(cli.cli, ["config", "show"])
+
+    assert "no config file yet" not in result.output
 
 
 def test_config_show_marks_file_backed_values(runner: CliRunner) -> None:
@@ -273,7 +324,7 @@ def test_config_set_notes_that_it_created_the_file(runner: CliRunner) -> None:
     result = runner.invoke(cli.cli, ["config", "set", "literature.prefer_pdf", "true"])
 
     assert result.exit_code == 0, result.output
-    assert "boepie config create" in result.output
+    assert "boepie config init" in result.output
 
 
 def test_config_set_warns_when_an_env_var_shadows_the_write(
@@ -313,7 +364,7 @@ def test_config_group_help_lists_subcommands(runner: CliRunner) -> None:
     result = runner.invoke(cli.cli, ["config", "--help"])
 
     assert result.exit_code == 0
-    for subcommand in ("create", "path", "show", "get", "set"):
+    for subcommand in ("init", "path", "show", "get", "set"):
         assert subcommand in result.output
 
 

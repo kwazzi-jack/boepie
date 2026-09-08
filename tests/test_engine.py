@@ -362,7 +362,7 @@ class MutableLoader:
 async def test_rebuilding_evicts_the_cached_handle(tmp_path):
     """A rebuild in the same process must be visible to the next search.
 
-    `context apply` rebuilds and `search_context` runs in the same
+    `context sync` rebuilds and `search_context` runs in the same
     long-lived server process, so a cached pre-rebuild handle would keep
     serving deleted content indefinitely.
     """
@@ -389,10 +389,10 @@ async def test_build_hint_names_a_real_command_per_collection(tmp_path):
     """The fix clause must name a command that actually exists."""
     with pytest.raises(FileNotFoundError) as literature_error:
         await engine.load_for_query(tmp_path, "literature")
-    assert "boepie index build --collection literature" in str(literature_error.value)
+    assert "boepie corpus index --collection literature" in str(literature_error.value)
 
     with pytest.raises(FileNotFoundError) as context_error:
         await engine.load_for_query(tmp_path, "context")
     message = str(context_error.value)
-    assert "boepie context apply" in message
+    assert "boepie context sync" in message
     assert "boepie index" not in message

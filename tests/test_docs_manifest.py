@@ -1,4 +1,4 @@
-"""Tests for boepie.docs.manifest: the packaged manifest `corpus fetch`
+"""Tests for boepie.docs.manifest: the packaged manifest `corpus sync`
 reconciles against."""
 
 from __future__ import annotations

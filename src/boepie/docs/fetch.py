@@ -28,7 +28,7 @@ import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from fnmatch import fnmatch
-from typing import Iterator
+from typing import Callable, Iterator
 from urllib.parse import urljoin, urlsplit, urlunsplit
 from urllib.robotparser import RobotFileParser
 
@@ -105,6 +105,12 @@ class PageContent:
     markdown: str | None
     error: str | None = None
     page_url: str | None = None
+    # Enumerated, deliberately not requested: the caller already holds this
+    # page and said so through `have_page`. Distinct from a failure, which
+    # also carries `markdown=None`, and it still has to be *yielded* - the
+    # caller deletes any page it did not see as no longer served, so a page
+    # silently omitted here would be a page deleted from the corpus.
+    not_fetched: bool = False
 
 
 
@@ -194,18 +200,31 @@ def iter_sphinx_pages(
     timeout: int,
     *,
     delay: float = _DEFAULT_FETCH_DELAY_SECONDS,
+    have_page: Callable[[str], bool] | None = None,
 ) -> Iterator[PageContent]:
     """Every page of a Sphinx project, as `PageContent`.
 
     Reads the exact page list out of the site's own `searchindex.js`, so
     nothing is guessed or crawled. Sleeps `delay` seconds after each
     successfully converted page.
+
+    `have_page` is asked about each docname *before* it is requested, and a
+    True answer yields `not_fetched` instead of downloading. The page list
+    is known up front here, so this costs one request for `searchindex.js`
+    and nothing else - which is the whole point: the caller's skip used to
+    happen after the page had been downloaded and converted, so a second
+    `corpus sync` re-pulled all 98 pages and threw every one away.
     """
     docnames = fetch_docnames(client, project.base_url, timeout)
     wanted = [docname for docname in docnames if not _is_excluded(docname, project.exclude)]
 
     for docname in wanted:
         page_url = urljoin(project.base_url, f"{docname}.html")
+        if have_page is not None and have_page(docname):
+            yield PageContent(
+                docname=docname, markdown=None, page_url=page_url, not_fetched=True
+            )
+            continue
         try:
             html = _get(client, page_url, timeout).text
             markdown = convert_page(html, page_url)
@@ -512,6 +531,7 @@ def iter_project_pages(
     timeout: int = _REQUEST_TIMEOUT_SECONDS,
     max_pages: int = _MAX_PAGES,
     max_depth: int = _MAX_DEPTH,
+    have_page: Callable[[str], bool] | None = None,
 ) -> Iterator[PageContent]:
     """Every page of a project, whatever its discovery mode, as `PageContent`.
 
@@ -523,8 +543,16 @@ def iter_project_pages(
     """
     discovery = project.discovery or probe_discovery_mode(client, project.base_url, timeout)
     if discovery == "sphinx":
-        yield from iter_sphinx_pages(client, project, timeout, delay=delay)
+        yield from iter_sphinx_pages(
+            client, project, timeout, delay=delay, have_page=have_page
+        )
     else:
+        # `have_page` is deliberately not threaded into the generic path. A
+        # link-following crawl finds the next page *in* the current one, so
+        # not fetching a page it already has would lose everything reachable
+        # only through it. Sitemap discovery could honour it, but the two
+        # share one walk and splitting them for a mode no shipped project
+        # uses would be complexity bought on spec.
         yield from iter_generic_pages(
             client, project, discovery=discovery, delay=delay, timeout=timeout,
             max_pages=max_pages, max_depth=max_depth,

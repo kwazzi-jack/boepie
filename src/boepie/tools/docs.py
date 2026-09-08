@@ -61,7 +61,7 @@ async def search_docs(input: SearchDocsInput) -> str:
     if input.project is not None:
         # Filters on `group`, not `docs.project`: a docs page's project *is*
         # the group directory it is filed under (both `corpus add -d` and
-        # `corpus fetch` put pages under `{project}/`, always one level), so
+        # `corpus sync` put pages under `{project}/`, always one level), so
         # keeping a second `docs.project` predicate here would be two
         # mechanisms for one concept - and would disagree with the CLI's
         # `--project`, which is an alias for `--group`.

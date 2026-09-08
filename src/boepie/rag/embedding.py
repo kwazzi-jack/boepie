@@ -7,7 +7,7 @@ embeds one question.
 
 ``fastembed`` is the default ``kind``: it runs a small ONNX model on CPU with
 no server process, no API key, and no network beyond a one-time model
-download cached locally - so `index build`/`search` work out of the box with
+download cached locally - so `corpus index`/`search` work out of the box with
 nothing else installed or running. ``ollama``/``openai`` remain available for
 anyone already running local LLM infra or who wants a hosted API's quality.
 
@@ -167,7 +167,7 @@ async def embed_texts(
 # CLI plumbing: one shared decorator for the --embedding-* option group
 # ---------------------------------------------------------------------------
 #
-# `index build` and `search` both need to construct a ModelBinding from the
+# `corpus index` and `search` both need to construct a ModelBinding from the
 # same four options, resolving and validating the host the same way. This lives
 # here (next to ModelBinding) rather than in cli.py so there is a single source
 # of truth for the option surface and the host rules, and no per-command drift.

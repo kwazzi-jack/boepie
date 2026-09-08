@@ -40,8 +40,12 @@ class SearchContextInput(BaseModel):
     question: str = Field(
         description="Natural-language query, e.g. 'how does substitution work in a recipe?'."
     )
-    top_k: int = Field(default=DEFAULT_TOP_K, ge=1, le=20, description=TOP_K_DESCRIPTION)
-    snippet: Snippet = Field(default=cast(Snippet, DEFAULT_SNIPPET), description=SNIPPET_DESCRIPTION)
+    top_k: int = Field(
+        default=DEFAULT_TOP_K, ge=1, le=20, description=TOP_K_DESCRIPTION
+    )
+    snippet: Snippet = Field(
+        default=cast(Snippet, DEFAULT_SNIPPET), description=SNIPPET_DESCRIPTION
+    )
 
 
 async def search_context(input: SearchContextInput) -> str:
@@ -60,7 +64,7 @@ async def search_context(input: SearchContextInput) -> str:
     if bundle_dir is None:
         return (
             f"Error: no .boepie/ bundle found in {Path.cwd()} or any parent. "
-            "Run 'boepie context init'."
+            "Run `boepie context init`."
         )
 
     try:
@@ -75,7 +79,7 @@ async def search_context(input: SearchContextInput) -> str:
     except FileNotFoundError:
         return (
             f"Error: bundle {bundle_dir} has no search index. "
-            "Run 'boepie context apply'."
+            "Run `boepie context sync`."
         )
     except ValueError as error:
         return f"Error: {one_line(error)}"

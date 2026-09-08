@@ -1,4 +1,4 @@
-"""Tests for boepie.literature.manifest: the packaged manifest `corpus fetch`
+"""Tests for boepie.literature.manifest: the packaged manifest `corpus sync`
 reconciles against, and the citekey derivation `corpus add literature` uses."""
 
 from __future__ import annotations

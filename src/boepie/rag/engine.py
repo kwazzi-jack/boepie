@@ -185,7 +185,7 @@ class IndexFreshness:
 
     Documents *added* since the build are counted separately and never make
     the state `stale`. They leave the index incomplete rather than wrong,
-    which is the normal state between a `corpus add` and the `index build`
+    which is the normal state between a `corpus add` and the `corpus index`
     that follows it - so serving decides on `stale` alone, while a caller
     asking "is this index complete" (`boepie setup`, `index status`) reads
     `added` as well.
@@ -243,6 +243,18 @@ def index_freshness(
     )
 
 
+def index_command(collection: str) -> str:
+    """The command that (re)builds `collection`'s index.
+
+    Indexing is a verb on the noun that owns the index rather than a noun of
+    its own, and the bundle's index is not a corpus collection at all - it is
+    per-project and lives inside the bundle - so the two answers differ.
+    """
+    if collection == "context":
+        return "context index"
+    return f"corpus index --collection {collection}"
+
+
 def _stale_reason(manifest: BuildManifest, collection: str) -> str | None:
     """Why `manifest`'s index must not be served, or None if it may be."""
     freshness = index_freshness(manifest.built_from, collection)
@@ -254,7 +266,9 @@ def _stale_reason(manifest: BuildManifest, collection: str) -> str | None:
     ]
     return (
         f"the '{collection}' index is stale: of the "
-        f"{freshness.document_count} document(s) it was built over, "
+        f"{freshness.document_count} "
+        f"{'document' if freshness.document_count == 1 else 'documents'} it "
+        f"was built over, "
         f"{' and '.join(part for part in counts if part)} on disk. "
         f"{_rebuild_hint(collection)}"
     )
@@ -395,21 +409,21 @@ def _build_hint(collection: str) -> str:
     inside a project's own `.boepie/` bundle, rebuilt by the bundle commands.
     """
     if collection == "context":
-        return "Run `boepie context apply` (or `init` if there is no bundle yet)."
-    return f"Run `boepie index build --collection {collection}` first."
+        return "Run `boepie context sync` (or `init` if there is no bundle yet)."
+    return f"Run `boepie {index_command(collection)}` first."
 
 
 def _rebuild_hint(collection: str) -> str:
     """The command that brings `collection`'s index back in step with its corpus.
 
     Separate from `_build_hint` because the two say different things for the
-    context bundle, whose index is rebuilt by `context apply` rather than by
-    `index build`, and because a rebuild is a different instruction from a
+    context bundle, whose index is rebuilt by `context sync` rather than by
+    `corpus index`, and because a rebuild is a different instruction from a
     first build even when the command happens to be the same.
     """
     if collection == "context":
-        return "Run `boepie context apply` to rebuild it."
-    return f"Run `boepie index build --collection {collection}` to rebuild it."
+        return "Run `boepie context sync` to rebuild it."
+    return f"Run `boepie {index_command(collection)}` to rebuild it."
 
 
 def _resolve_index_id(index_root: Path, collection: str, index_id: str | None) -> str:

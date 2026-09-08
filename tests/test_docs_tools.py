@@ -244,7 +244,7 @@ async def test_search_docs_no_index_reports_one_line_error_naming_a_command(
     result = await search_docs(SearchDocsInput(question="anything"))
     assert result.startswith("Error:")
     assert len(result.splitlines()) == 1
-    assert "boepie index build --collection docs" in result
+    assert "boepie corpus index --collection docs" in result
 
 
 async def test_search_docs_top_k_upper_bound_is_twenty(docs_index):
