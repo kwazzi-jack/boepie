@@ -38,7 +38,6 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import shutil
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -46,6 +45,7 @@ from typing import Any, Callable, Literal
 
 import numpy as np
 
+from boepie._atomic import replace_file, replacing_directory
 from boepie.config import DEFAULT_TOP_K, FUSION_CANDIDATES, INDEX_DIR
 from boepie.rag.bm25 import Bm25Index
 from boepie.rag.chunking import chunk_document
@@ -338,43 +338,50 @@ async def build(
         index_id_for(embedding) if embedding is not None else _LEXICAL_ONLY_INDEX_ID
     )
     collection_dir = Path(index_root) / loader.name / resolved_id
-    if collection_dir.exists():
-        shutil.rmtree(collection_dir)
-    collection_dir.mkdir(parents=True)
 
     texts = [c.text for c in chunks]
-    if embedding is not None:
-        try:
-            matrix = await embed_texts(embedding, texts, on_progress=on_progress)
-        except Exception as error:  # surface a backend outage with useful context
-            raise RuntimeError(
-                f"Embedding backend failed ({embedding.kind}:{embedding.model} "
-                f"@ {embedding.host}): {error}"
-            ) from error
-        np.save(collection_dir / _EMBEDDINGS_FILE, matrix)
+    # Staged and swapped in at the end rather than built in place: embedding a
+    # corpus takes minutes, and deleting the previous index first meant a
+    # Ctrl-C partway through left the collection with no index at all - strictly
+    # worse than never having run the command, and reported afterwards as
+    # though it had never been built. The old index now serves for the whole
+    # build and an interrupt costs only the work.
+    with replacing_directory(collection_dir) as staging:
+        if embedding is not None:
+            try:
+                matrix = await embed_texts(embedding, texts, on_progress=on_progress)
+            except Exception as error:  # surface a backend outage with useful context
+                raise RuntimeError(
+                    f"Embedding backend failed ({embedding.kind}:{embedding.model} "
+                    f"@ {embedding.host}): {error}"
+                ) from error
+            np.save(staging / _EMBEDDINGS_FILE, matrix)
 
-    _write_chunks(collection_dir / _CHUNKS_FILE, chunks)
-    bm25 = Bm25Index.build(texts)
-    bm25.save(collection_dir / _BM25_DIR)
+        _write_chunks(staging / _CHUNKS_FILE, chunks)
+        bm25 = Bm25Index.build(texts)
+        bm25.save(staging / _BM25_DIR)
 
-    manifest = BuildManifest(
-        name=loader.name,
-        count=len(chunks),
-        index_id=resolved_id,
-        embedding_kind=embedding.kind if embedding is not None else None,
-        embedding_model=embedding.model if embedding is not None else None,
-        embedding_dim=embedding.dim if embedding is not None else None,
-        lexical_only=embedding is None,
-        built_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        sources=_collect_sources(loader),
-        built_from=_record_revision(loader, indexed),
-    )
-    (collection_dir / _MANIFEST_FILE).write_text(
-        json.dumps(manifest.to_dict(), indent=2), encoding="utf-8"
-    )
+        manifest = BuildManifest(
+            name=loader.name,
+            count=len(chunks),
+            index_id=resolved_id,
+            embedding_kind=embedding.kind if embedding is not None else None,
+            embedding_model=embedding.model if embedding is not None else None,
+            embedding_dim=embedding.dim if embedding is not None else None,
+            lexical_only=embedding is None,
+            built_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            sources=_collect_sources(loader),
+            built_from=_record_revision(loader, indexed),
+        )
+        (staging / _MANIFEST_FILE).write_text(
+            json.dumps(manifest.to_dict(), indent=2), encoding="utf-8"
+        )
 
+    # After the swap, never before: `latest.json` is the pointer that makes an
+    # index findable, so publishing it over a directory that is still being
+    # written is the one ordering that could serve a half-built index.
     latest_path = Path(index_root) / loader.name / _LATEST_FILE
-    latest_path.write_text(json.dumps({"index_id": resolved_id}, indent=2), encoding="utf-8")
+    replace_file(latest_path, json.dumps({"index_id": resolved_id}, indent=2))
 
     # The handle cache holds chunks read at load time, so anything cached for
     # what we just overwrote is now stale. Evict both the explicitly-keyed

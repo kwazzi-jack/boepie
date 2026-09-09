@@ -45,11 +45,12 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from boepie._atomic import replace_file
 
 SERVER_NAME = "boepie"
 
@@ -235,16 +236,7 @@ def _read_json(path: Path) -> dict[str, Any]:
 def _write_json(path: Path, data: dict[str, Any]) -> None:
     """Replace `path` atomically, so an interrupted write cannot truncate a
     config the user already had."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    handle, temporary = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
-    try:
-        with os.fdopen(handle, "w", encoding="utf-8") as stream:
-            json.dump(data, stream, indent=2)
-            stream.write("\n")
-        os.replace(temporary, path)
-    except BaseException:
-        Path(temporary).unlink(missing_ok=True)
-        raise
+    replace_file(path, json.dumps(data, indent=2) + "\n")
 
 
 def write_file_target(

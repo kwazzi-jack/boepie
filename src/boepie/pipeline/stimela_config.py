@@ -22,7 +22,7 @@ into `input_ms.path`, `input_ms.data_column`, resolves `_use` inheritance,
 and assigns each parameter a `ParameterCategory`. There is no shortcut to
 it that is worth taking.
 
-Four things about driving that chain in-process rather than from the CLI:
+Five things about driving that chain in-process rather than from the CLI:
 
 - **`stimela.VERBOSE` must exist.** Only `stimela.main` sets it, and the
   python cab flavours read it during `Cab.__post_init__`, so an in-process
@@ -43,6 +43,17 @@ Four things about driving that chain in-process rather than from the CLI:
   from 0.2.0 to 0.2.1 this process kept parsing the 0.2.0 definitions, and
   all 17 `casa.*` cabs kept failing on a `pre_command` key that the new
   version had already renamed. `stimela -C` clears it.
+- **stimela logs to stdout, and under the MCP server stdout is the wire.**
+  `stimela.stimelogging` builds its one module-level rich console as
+  `Console(file=sys.stdout)`, and every INFO line - `loaded full
+  configuration from cache`, `loading manifest from <path>` - goes there. On
+  the stdio transport that is the JSON-RPC channel, so the first cab or
+  recipe tool call interleaves log text with protocol frames and the client
+  fails to parse them (`Invalid JSON: trailing characters`). `_log_to_stderr`
+  points that console at stderr at import, which is where a server's
+  diagnostics belong on either surface. Rebinding `.file` is stimela's own
+  mechanism - `kitchen/recipe.py` swaps in a `StringIO` the same way, and
+  never restores it, so nothing can put stdout back.
 """
 
 from __future__ import annotations
@@ -51,12 +62,14 @@ import copy
 import functools
 import importlib.metadata
 import logging
+import sys
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 import scabha.configuratt.cache
 import stimela
+import stimela.stimelogging
 import yaml
 from stimela import config as stimela_config
 from stimela.commands.run import load_recipe_files, resolve_recipe_files
@@ -68,6 +81,22 @@ from boepie.config import (
     PIPELINE_SOURCES,
     STIMELA_CONFIG_CACHE_DIR,
 )
+
+
+def _log_to_stderr() -> None:
+    """Send stimela's logging to stderr, before it can emit a single line.
+
+    Called at import, which is early enough because nothing reaches stimela
+    except through this module. Guarded rather than assumed: the attribute is
+    stimela's, so a version that renames or drops it must not stop boepie
+    importing - the cost of missing it is noisy output, not a wrong answer.
+    """
+    console = getattr(stimela.stimelogging, "rich_console", None)
+    if console is not None:
+        console.file = sys.stderr
+
+
+_log_to_stderr()
 
 
 class StimelaConfigError(Exception):

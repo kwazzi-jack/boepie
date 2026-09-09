@@ -8,6 +8,7 @@ that must not take the rest of the catalogue with it.
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 
@@ -258,3 +259,45 @@ def test_configured_sources_does_not_repeat_a_discovered_one(
     sources = configured_sources()
 
     assert sources.count("cultcargo::") == 1
+
+
+# ---------------------------------------------------------------------------
+# stdout belongs to the MCP wire, and nothing else may write to it
+# ---------------------------------------------------------------------------
+
+
+def test_a_pipeline_tool_writes_nothing_to_stdout() -> None:
+    """The MCP stdio transport *is* stdout, so a stray log line breaks it.
+
+    stimela's rich console is built as `Console(file=sys.stdout)` and logs
+    `loaded full configuration from cache` plus one `loading manifest from
+    <path>` per library. Before `_log_to_stderr`, the first `list_cabs` call
+    over stdio put 567 bytes of that in the JSON-RPC stream and the client
+    answered with `Invalid JSON: trailing characters`.
+
+    Asserted in a subprocess against real stimela, because the whole point is
+    what a fresh server process emits before it has answered anything.
+    """
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from boepie.pipeline.cabs import list_cabs; list_cabs()",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        stdin=subprocess.DEVNULL,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout == "", (
+        f"a pipeline tool wrote {len(completed.stdout)} bytes to stdout, which "
+        f"is the MCP JSON-RPC channel:\n{completed.stdout[:500]}"
+    )
+
+
+def test_stimela_logging_is_pointed_at_stderr() -> None:
+    """The mechanism, so a stimela release that renames it fails here first."""
+    import stimela.stimelogging
+
+    assert stimela.stimelogging.rich_console.file is sys.stderr

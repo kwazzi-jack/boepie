@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from boepie._atomic import replace_file
 from boepie.context.frontmatter import read_frontmatter, write_frontmatter
 from boepie.corpus.layout import WRAPPED_DOCUMENT_FILENAME, CorpusFrontmatter
 
@@ -90,18 +91,18 @@ def write_leaf_document(
         leaf_path = wrapper_dir / WRAPPED_DOCUMENT_FILENAME
         _guard_against_id_collision(leaf_path, document_id)
         wrapper_dir.mkdir(parents=True, exist_ok=True)
-        leaf_path.write_text(text, encoding="utf-8")
+        replace_file(leaf_path, text)
         for asset_name, asset_bytes in assets.items():
             asset_path = wrapper_dir / asset_name
             asset_path.parent.mkdir(parents=True, exist_ok=True)
-            asset_path.write_bytes(asset_bytes)
+            replace_file(asset_path, asset_bytes)
         return CorpusDocument(
             id=document_id, md_path=leaf_path, wrapper_dir=wrapper_dir,
             frontmatter=full_frontmatter, body=body,
         )
 
     md_path.parent.mkdir(parents=True, exist_ok=True)
-    md_path.write_text(text, encoding="utf-8")
+    replace_file(md_path, text)
     return CorpusDocument(
         id=document_id, md_path=md_path, wrapper_dir=None,
         frontmatter=full_frontmatter, body=body,
@@ -136,9 +137,8 @@ def move_leaf_document(
             target_dir.parent.mkdir(parents=True, exist_ok=True)
             document.wrapper_dir.rename(target_dir)
         leaf_path = target_dir / WRAPPED_DOCUMENT_FILENAME
-        leaf_path.write_text(
-            write_frontmatter({"id": document.id, **frontmatter}, document.body),
-            encoding="utf-8",
+        replace_file(
+            leaf_path, write_frontmatter({"id": document.id, **frontmatter}, document.body)
         )
         return CorpusDocument(
             id=document.id, md_path=leaf_path, wrapper_dir=target_dir,
@@ -146,9 +146,8 @@ def move_leaf_document(
         )
 
     target_md_path.parent.mkdir(parents=True, exist_ok=True)
-    target_md_path.write_text(
-        write_frontmatter({"id": document.id, **frontmatter}, document.body),
-        encoding="utf-8",
+    replace_file(
+        target_md_path, write_frontmatter({"id": document.id, **frontmatter}, document.body)
     )
     if target_md_path.resolve() != document.md_path.resolve():
         document.md_path.unlink()

@@ -40,6 +40,7 @@ from pathlib import Path
 from typing import Literal
 
 from boepie import __version__ as _installed_boepie_version
+from boepie._atomic import replace_file
 from boepie.assets import asset_checksum, context_content_dir
 from boepie.config import bundle_dir_override
 from boepie.context.frontmatter import read_frontmatter
@@ -152,7 +153,7 @@ def ensure_gitignore(bundle_dir: Path) -> bool:
         return False
 
     separator = "" if not existing_text or existing_text.endswith("\n") else "\n"
-    gitignore_path.write_text(existing_text + separator + _GITIGNORE_LINE + "\n", encoding="utf-8")
+    replace_file(gitignore_path, existing_text + separator + _GITIGNORE_LINE + "\n")
     return True
 
 
@@ -192,7 +193,7 @@ def _current_manifest(source_dir: Path) -> BundleManifest:
 def _write_manifest(bundle_dir: Path, source_dir: Path) -> BundleManifest:
     manifest = _current_manifest(source_dir)
     manifest_path = bundle_dir / _MANIFEST_FILENAME
-    manifest_path.write_text(json.dumps(manifest.to_dict(), indent=2), encoding="utf-8")
+    replace_file(manifest_path, json.dumps(manifest.to_dict(), indent=2))
     return manifest
 
 
@@ -276,7 +277,7 @@ def _prepend_log_entry(log_path: Path, message: str) -> None:
     if remaining_lines:
         rebuilt_lines.extend(["", *remaining_lines])
 
-    log_path.write_text("\n".join(rebuilt_lines) + "\n", encoding="utf-8")
+    replace_file(log_path, "\n".join(rebuilt_lines) + "\n")
 
 
 # ---------------------------------------------------------------------------
@@ -368,7 +369,7 @@ def _copy_managed_files(
             continue
 
         target_path.parent.mkdir(parents=True, exist_ok=True)
-        target_path.write_bytes(source_path.read_bytes())
+        replace_file(target_path, source_path.read_bytes())
         rewritten_paths.append(relative_path)
     return rewritten_paths
 
@@ -656,5 +657,5 @@ def append_agents_pointer(agents_md: Path) -> bool:
         separator = "" if existing_text.endswith("\n") else "\n"
         new_text = existing_text + separator + "\n" + _POINTER_LINE + "\n"
 
-    agents_md.write_text(new_text, encoding="utf-8")
+    replace_file(agents_md, new_text)
     return True
