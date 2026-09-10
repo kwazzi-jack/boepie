@@ -48,6 +48,7 @@ from boepie.pipeline.stimela_config import (
     StimelaConfigError,
     describe_sources,
     loaded_config,
+    skipped_sources_note,
 )
 
 
@@ -145,10 +146,13 @@ def list_recipes(input: ListRecipesInput) -> str:
     except StimelaConfigError as error:
         return f"Error: {error}"
 
+    # A library boepie found and could not load is named before the count,
+    # since that count is otherwise a claim about the whole environment.
+    skipped = skipped_sources_note(config.skipped_sources)
     names = config.recipe_names_all()
     total = len(names)
     if not total:
-        return (
+        return skipped + (
             f"No recipes available. The stimela libraries boepie found "
             f"({describe_sources()}) provide cabs but no recipes; pass "
             f"source=<path to a recipe .yml> to read one from disk."
@@ -157,7 +161,7 @@ def list_recipes(input: ListRecipesInput) -> str:
     if input.pattern:
         names = fnmatch.filter(names, input.pattern)
         if not names:
-            return f"No recipes match the pattern '{input.pattern}'."
+            return skipped + f"No recipes match the pattern '{input.pattern}'."
 
     origins = config.recipe_origins()
     rows = [
@@ -169,7 +173,7 @@ def list_recipes(input: ListRecipesInput) -> str:
         for name in names
     ]
     header = f"# showing {len(rows)} of {total} recipes\n"
-    return header + write_csv(rows, ["recipe", "description", "origin"])
+    return skipped + header + write_csv(rows, ["recipe", "description", "origin"])
 
 
 class GetRecipeDocsInput(BaseModel):

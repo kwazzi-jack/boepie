@@ -10,12 +10,15 @@ from __future__ import annotations
 
 import subprocess
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
 from boepie.config import PIPELINE_SOURCES
 from boepie.pipeline import stimela_config as stimela_config_module
+from boepie.pipeline.cabs import list_cabs
+from boepie.pipeline.recipe import ListRecipesInput, list_recipes
 from boepie.pipeline.stimela_config import (
     StimelaConfigError,
     configured_sources,
@@ -259,6 +262,154 @@ def test_configured_sources_does_not_repeat_a_discovered_one(
     sources = configured_sources()
 
     assert sources.count("cultcargo::") == 1
+
+
+# ---------------------------------------------------------------------------
+# One broken library must not empty the catalogue
+#
+# `load_recipe_files` is handed every source's files at once and exits on
+# the first one it cannot parse, so a single unparseable YAML in a package
+# that merely happens to be installed beside boepie took every other
+# library down with it - reported from a real venv where `pfb_imaging`
+# ships a `cabs.yml` whose `_include` cannot be resolved, and `list_cabs`
+# answered with an error about a file the user had never heard of.
+# ---------------------------------------------------------------------------
+
+
+def _install_broken_library(root: Path, package: str) -> None:
+    """A package that looks installed and whose YAML cannot be loaded.
+
+    The `_include` names a file that is not there, which is the shape the
+    live failure took: resolution finds the YAML, and only loading it fails.
+    """
+    recipes = root / package / "recipes"
+    recipes.mkdir(parents=True)
+    (root / package / "__init__.py").touch()
+    (recipes / "__init__.py").touch()
+    (recipes / "broken.yml").write_text(
+        "_include:\n"
+        "  - nosuchfile.yml::cabs.nothing\n"
+        "\n"
+        "broken-recipe:\n"
+        '  info: "a recipe that cannot load"\n'
+        "  steps:\n"
+        "    nope:\n"
+        "      cab: nosuchcab\n"
+    )
+    dist_info = root / f"{package}-0.1.0.dist-info"
+    dist_info.mkdir()
+    (dist_info / "METADATA").write_text(
+        f"Metadata-Version: 2.1\nName: {package}\nVersion: 0.1.0\n"
+    )
+    (dist_info / "RECORD").write_text(
+        f"{package}/__init__.py,,\n"
+        f"{package}/recipes/__init__.py,,\n"
+        f"{package}/recipes/broken.yml,,\n"
+    )
+
+
+@pytest.fixture(scope="module")
+def broken_and_healthy_libraries(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Iterator[Path]:
+    """A broken library and a healthy one, both discoverable.
+
+    Module-scoped, and so is the load it provokes: the source tuple is the
+    cache key, so every test that sees these two libraries shares one
+    ten-second load rather than paying for its own.
+    """
+    root = tmp_path_factory.mktemp("libraries")
+    _install_broken_library(root, "boepiebrokenlib")
+    _install_fake_library(root, "boepiehealthylib")
+    sys.path.insert(0, str(root))
+    try:
+        yield root
+    finally:
+        sys.path.remove(str(root))
+        stimela_config_module._BASE_CONFIGS.clear()
+
+
+def test_a_broken_discovered_library_does_not_empty_the_catalogue(
+    broken_and_healthy_libraries: Path,
+):
+    """The library that fails is the only one lost."""
+    config = loaded_config()
+
+    assert "boepiebrokenlib.recipes::" in discover_installed_sources()
+    assert "wsclean" in config.cab_names()
+    assert "tron-solve" in config.cab_names()
+    assert "tron" in config.recipe_names_all()
+
+
+def test_a_skipped_library_is_named_rather_than_dropped_in_silence(
+    broken_and_healthy_libraries: Path,
+):
+    """A library missing from the catalogue reads as one never installed."""
+    config = loaded_config()
+
+    skipped = {item.spec for item in config.skipped_sources}
+    assert skipped == {"boepiebrokenlib.recipes::"}
+    reason = config.skipped_sources[0].reason
+    assert "broken.yml" in reason
+    assert "nosuchfile.yml" in reason
+
+
+def test_the_skip_is_reported_in_the_tools_own_output(
+    broken_and_healthy_libraries: Path,
+):
+    """`list_cabs` and `list_recipes` are where an agent learns what exists,
+    so a shortened catalogue has to say that it is one."""
+    assert "# skipped boepiebrokenlib.recipes::" in list_cabs()
+    assert "# skipped boepiebrokenlib.recipes::" in list_recipes(ListRecipesInput())
+
+
+def test_a_skip_reason_is_capped_rather_than_pasted_whole(
+    broken_and_healthy_libraries: Path,
+):
+    """scabha ends this message with stimela's whole config search path -
+    ten directories of it, repeated, into MCP output that is charged for."""
+    reason = loaded_config().skipped_sources[0].reason
+
+    assert len(reason) <= stimela_config_module._MAX_SKIP_REASON + len(" ...")
+    assert reason.endswith("...")
+
+
+def test_a_broken_configured_source_is_an_error_not_a_skip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """`pipeline.sources` is the user's own instruction, `cultcargo::`
+    included, so a broken one there has to be seen: 16 of cult-cargo's 37
+    YAML files fail under scabha rc4, and skipping them would answer "what
+    can flag data" with a catalogue quietly missing every `casa.*` cab."""
+    _install_broken_library(tmp_path, "boepieconfiguredlib")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    monkeypatch.setattr(
+        stimela_config_module,
+        "PIPELINE_SOURCES",
+        ["boepieconfiguredlib.recipes::", *PIPELINE_SOURCES],
+    )
+    monkeypatch.setattr(stimela_config_module, "_BASE_CONFIGS", {})
+
+    with pytest.raises(StimelaConfigError, match="boepieconfiguredlib"):
+        loaded_config()
+
+
+def test_a_failed_load_is_remembered_rather_than_repeated(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The load costs the same ten seconds whether it succeeds or fails, and
+    nothing about an installed source changes while the process runs."""
+    monkeypatch.setattr(
+        stimela_config_module, "PIPELINE_SOURCES", ["boepienosuchlib.recipes::"]
+    )
+    monkeypatch.setattr(stimela_config_module, "_BASE_CONFIGS", {})
+
+    with pytest.raises(StimelaConfigError) as first:
+        loaded_config()
+    with pytest.raises(StimelaConfigError) as second:
+        loaded_config()
+
+    assert first.value is second.value
 
 
 # ---------------------------------------------------------------------------

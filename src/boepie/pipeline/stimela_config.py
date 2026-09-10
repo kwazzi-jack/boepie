@@ -22,7 +22,7 @@ into `input_ms.path`, `input_ms.data_column`, resolves `_use` inheritance,
 and assigns each parameter a `ParameterCategory`. There is no shortcut to
 it that is worth taking.
 
-Five things about driving that chain in-process rather than from the CLI:
+Six things about driving that chain in-process rather than from the CLI:
 
 - **`stimela.VERBOSE` must exist.** Only `stimela.main` sets it, and the
   python cab flavours read it during `Cab.__post_init__`, so an in-process
@@ -54,15 +54,23 @@ Five things about driving that chain in-process rather than from the CLI:
   diagnostics belong on either surface. Rebinding `.file` is stimela's own
   mechanism - `kitchen/recipe.py` swaps in a `StringIO` the same way, and
   never restores it, so nothing can put stdout back.
+- **`load_recipe_files` takes every source's files at once, and exits on
+  the first one it cannot parse.** That is the right shape for the CLI,
+  where the user named the file, and the wrong one here, where boepie
+  names them: one broken library installed beside boepie emptied the
+  catalogue for every other library, and the agent was told only about a
+  file it had never heard of. So a failed merged load is retried source by
+  source and only the source that actually fails is dropped - loudly, in
+  the tool's own output. See `_load_sources_separately`.
 """
 
 from __future__ import annotations
 
 import copy
-import functools
 import importlib.metadata
 import logging
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -205,42 +213,200 @@ def _initialise_stimela() -> None:
     scabha.configuratt.cache.set_cache_dir(str(STIMELA_CONFIG_CACHE_DIR))
 
 
-@functools.cache
-def _base_config(sources: tuple[str, ...]) -> tuple[Any, tuple[str, ...]]:
-    """The resolved stimela config with `sources` merged in.
+@dataclass(frozen=True)
+class SkippedSource:
+    """A library left out of the catalogue, and why.
 
-    Cached per source tuple: loading cult-cargo alone parses 36 YAML files
-    and takes roughly ten seconds, which is fine once per process and not
-    fine per tool call. The cache holds the config used as the *base* for
-    every call - `loaded_config` copies it before anything is layered on.
+    Reported rather than dropped in silence: a library missing from the
+    catalogue looks exactly like one that was never installed, and the cab
+    an agent is hunting for may be precisely the one that went missing.
     """
+
+    spec: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class _BaseConfig:
+    """A loaded base config, the files behind it, and what was left out."""
+
+    config: Any
+    source_paths: tuple[str, ...]
+    skipped: tuple[SkippedSource, ...]
+
+
+def _is_strict(spec: str) -> bool:
+    """Whether this source failing should take the whole load down with it.
+
+    A source named in `pipeline.sources` is the user's own instruction -
+    `cultcargo::` included, since it is there by default - so a broken one
+    is an error they have to see: 16 of cult-cargo 0.2.1's 37 YAML files
+    fail under scabha rc4, and skipping those tolerantly would answer
+    "what can flag data" with a catalogue that has quietly lost all 17
+    `casa.*` cabs. Anything that only turned up in discovery is a package
+    that merely happens to be installed beside boepie, and one of those
+    must not be able to empty the catalogue for all the others.
+    """
+    return spec in PIPELINE_SOURCES
+
+
+# A skip reason goes into MCP output, so it is capped. scabha ends an
+# `_include not found` message with stimela's whole config search path -
+# ten fixed directories, about 500 characters, and repeated once per load
+# attempt - where everything a reader can act on (the library, the file,
+# the key, the missing include) is in the first line and a half. The full
+# text is still logged to stderr.
+_MAX_SKIP_REASON = 240
+
+
+def _skip_reason(spec: str, error: BaseException) -> str:
+    """Why a source was skipped, without repeating its own name.
+
+    stimela's messages open with the spec it was handed, and the line
+    boepie renders names it already. Collapsed onto one line, since these
+    are printed one per source into an otherwise tabular payload.
+    """
+    reason = " ".join(str(error).split())
+    for prefix in (f"{spec}: ", f"{spec} ", f"'{spec}' "):
+        if reason.startswith(prefix):
+            reason = reason[len(prefix) :]
+            break
+    if len(reason) <= _MAX_SKIP_REASON:
+        return reason
+    return reason[:_MAX_SKIP_REASON].rsplit(" ", 1)[0] + " ..."
+
+
+def skipped_sources_note(skipped: Sequence[SkippedSource]) -> str:
+    """One comment line per source left out, or an empty string.
+
+    `list_cabs` and `list_recipes` are how an agent finds out what exists,
+    so they are where a missing library has to be named. Without it the
+    only signal is a cab that cannot be found, which reads as a cab that
+    was never packaged rather than as a library boepie could not load.
+    """
+    return "".join(f"# skipped {item.spec} - {item.reason}\n" for item in skipped)
+
+
+# The base config per source tuple, or the error that tuple raises. Loading
+# cult-cargo alone parses 36 YAML files and takes roughly ten seconds,
+# which is fine once per process and not fine per tool call - and a load
+# that fails costs the same ten seconds, so the failure is remembered too.
+# Nothing about an installed source changes while the process runs, so a
+# second attempt could only arrive at the same answer again.
+_BASE_CONFIGS: dict[tuple[str, ...], _BaseConfig | StimelaConfigError] = {}
+
+
+def _base_config(sources: tuple[str, ...]) -> _BaseConfig:
+    """The resolved stimela config with `sources` merged in, loaded once.
+
+    Holds the config used as the *base* for every call - `loaded_config`
+    copies it before anything is layered on.
+    """
+    remembered = _BASE_CONFIGS.get(sources)
+    if isinstance(remembered, StimelaConfigError):
+        raise remembered
+    if remembered is not None:
+        return remembered
+    try:
+        loaded = _load_base_config(sources)
+    except StimelaConfigError as error:
+        _BASE_CONFIGS[sources] = error
+        raise
+    _BASE_CONFIGS[sources] = loaded
+    return loaded
+
+
+def _load_base_config(sources: tuple[str, ...]) -> _BaseConfig:
+    """Load every source, isolating a failure to the source that caused it."""
     _initialise_stimela()
-    stimela.CONFIG = stimela_config.load_config(extra_configs=[])
-    if stimela.CONFIG is None:
+    stimela.CONFIG = _fresh_stimela_config()
+    resolved, skipped = _resolve_all(sources)
+    paths = [path for _, source_paths in resolved for path in source_paths]
+
+    try:
+        _load_paths(paths)
+    except StimelaConfigError:
+        # One unparseable file says nothing about the other libraries, and
+        # a single merged load cannot tell them apart. Start over and load
+        # each source on its own, so only the broken one is lost.
+        paths, isolated = _load_sources_separately(resolved)
+        skipped.extend(isolated)
+
+    return _BaseConfig(
+        config=stimela.CONFIG,
+        source_paths=tuple(paths),
+        skipped=tuple(skipped),
+    )
+
+
+def _fresh_stimela_config() -> Any:
+    """stimela's base config - opts, images, lib, cabs - with no sources."""
+    config = stimela_config.load_config(extra_configs=[])
+    if config is None:
         raise StimelaConfigError(
             "stimela could not load its base configuration. "
             "Run 'stimela -C' to clear the config cache and try again."
         )
-    # Discovered sources are loaded tolerantly: a package that merely looks
-    # like a stimela library (a `recipes/` directory of unrelated YAML, say)
-    # must not be able to empty the catalogue for everything else. A
-    # configured source is the user's explicit instruction, so a typo there
-    # stays an error.
-    discovered = set(discover_installed_sources()) if PIPELINE_DISCOVER else set()
-    usable: list[str] = []
-    for spec in sources:
-        if spec not in discovered:
-            usable.append(spec)
-            continue
-        try:
-            _resolve_source(spec)
-        except StimelaConfigError as error:
-            stimela.logger().warning(f"skipping discovered source {spec}: {error}")
-            continue
-        usable.append(spec)
+    return config
 
-    _, paths = _load_sources(usable)
-    return stimela.CONFIG, tuple(paths)
+
+def _resolve_all(
+    sources: tuple[str, ...],
+) -> tuple[list[tuple[str, list[str]]], list[SkippedSource]]:
+    """Each source to the YAML files it names, dropping unusable discoveries.
+
+    A package can look like a stimela library in its metadata and turn out
+    not to be one - a `recipes/` directory of unrelated YAML, or a module
+    that cannot be imported. This finds files; it deliberately does not
+    prove they parse, which is what loading them is for.
+    """
+    resolved: list[tuple[str, list[str]]] = []
+    skipped: list[SkippedSource] = []
+    for spec in sources:
+        try:
+            source_paths = _resolve_source(spec)
+        except StimelaConfigError as error:
+            if _is_strict(spec):
+                raise
+            stimela.logger().warning(f"skipping discovered source {spec}: {error}")
+            skipped.append(SkippedSource(spec=spec, reason=_skip_reason(spec, error)))
+            continue
+        resolved.append((spec, source_paths))
+    return resolved, skipped
+
+
+def _load_sources_separately(
+    resolved: list[tuple[str, list[str]]],
+) -> tuple[list[str], list[SkippedSource]]:
+    """Load one source at a time, leaving out the ones that will not load.
+
+    Only reached once the merged load has already failed, so the cost - one
+    more base load, plus a copy of the config per source - is paid by a
+    broken environment and never by a working one. The order is the order
+    the sources were given: a later source reaching an earlier one's
+    definitions finds them in `stimela.CONFIG`, exactly as it would have in
+    the merged load.
+    """
+    stimela.CONFIG = _fresh_stimela_config()
+    loaded: list[str] = []
+    skipped: list[SkippedSource] = []
+    for spec, paths in resolved:
+        # `load_recipe_files` writes each recipe straight into
+        # `stimela.CONFIG` as it goes, so a source that fails partway can
+        # leave part of itself behind. Restoring the copy is what makes
+        # dropping it complete.
+        snapshot = copy.deepcopy(stimela.CONFIG)
+        try:
+            _load_paths(paths)
+        except StimelaConfigError as error:
+            stimela.CONFIG = snapshot
+            if _is_strict(spec):
+                raise StimelaConfigError(f"failed to load {spec}: {error}") from error
+            stimela.logger().warning(f"skipping source {spec}: {error}")
+            skipped.append(SkippedSource(spec=spec, reason=_skip_reason(spec, error)))
+            continue
+        loaded.extend(paths)
+    return loaded, skipped
 
 
 def _resolve_source(spec: str) -> list[str]:
@@ -259,34 +425,47 @@ def _resolve_source(spec: str) -> list[str]:
     return resolved
 
 
-def _load_sources(sources: list[str]) -> tuple[list[str], list[str]]:
-    """Merge each source spec into the current `stimela.CONFIG`.
+def _load_paths(paths: list[str]) -> list[str]:
+    """Merge YAML files into the current `stimela.CONFIG`.
 
-    Returns the names of any recipes the sources defined, and the YAML paths
-    they resolved to. Sources are loaded in the order given, since a later
-    one may `_use` an earlier one's definitions - the same reason stimela
-    accumulates them into a single `load_recipe_files` call.
+    Returns the names of any recipes they defined. Raises stimela's own
+    wording, recovered from its logger, because `load_recipe_files` reports
+    a bad file by logging the reason and then calling `sys.exit(2)` -
+    uncaught, that would take the MCP server down with it.
     """
-    log = stimela.logger()
-    paths: list[str] = []
-    for spec in sources:
-        paths.extend(_resolve_source(spec))
-
     if not paths:
-        return [], []
-
+        return []
+    log = stimela.logger()
     captured = _CapturedLog()
     log.addHandler(captured)
     try:
         recipe_names, _ = load_recipe_files(paths)
     except SystemExit as error:
-        # stimela logs the reason, then exits. Uncaught this would kill the
-        # MCP server, so it becomes an exception carrying what it logged.
         detail = captured.summary() or f"stimela exited with code {error.code}"
-        raise StimelaConfigError(f"failed to load {', '.join(sources)}: {detail}") from error
+        raise StimelaConfigError(detail) from error
     finally:
         log.removeHandler(captured)
-    return list(recipe_names), paths
+    return list(recipe_names)
+
+
+def _load_sources(sources: list[str]) -> tuple[list[str], list[str]]:
+    """Resolve and merge each source spec into the current `stimela.CONFIG`.
+
+    Sources are loaded in the order given, since a later one may `_use` an
+    earlier one's definitions - the same reason stimela accumulates them
+    into a single `load_recipe_files` call.
+    """
+    paths: list[str] = []
+    for spec in sources:
+        paths.extend(_resolve_source(spec))
+    if not paths:
+        return [], []
+    try:
+        return _load_paths(paths), paths
+    except StimelaConfigError as error:
+        raise StimelaConfigError(
+            f"failed to load {', '.join(sources)}: {error}"
+        ) from error
 
 
 @dataclass(frozen=True)
@@ -297,12 +476,15 @@ class LoadedConfig:
     from one that came out of a configured library, which is what lets
     `list_recipes` say where each recipe came from. `source_paths` is every
     YAML the sources resolved to, kept so a recipe can be traced back to the
-    file it was written in.
+    file it was written in. `skipped_sources` is every library that was
+    found and could not be loaded, carried this far so a tool can say so
+    rather than presenting a shortened catalogue as the whole of it.
     """
 
     config: Any
     recipe_names: list[str]
     source_paths: list[str]
+    skipped_sources: tuple[SkippedSource, ...] = ()
 
     def recipe_origins(self) -> dict[str, Path]:
         """Every recipe name mapped to the YAML file that declares it.
@@ -419,21 +601,27 @@ def loaded_config(source: str | None = None) -> LoadedConfig:
     spelling callers get wrong and stimela's own message for it names the
     module it failed to import instead.
     """
-    base, base_paths = _base_config(tuple(configured_sources()))
+    base = _base_config(tuple(configured_sources()))
     if source is None:
-        return LoadedConfig(config=base, recipe_names=[], source_paths=list(base_paths))
+        return LoadedConfig(
+            config=base.config,
+            recipe_names=[],
+            source_paths=list(base.source_paths),
+            skipped_sources=base.skipped,
+        )
 
     if _looks_like_path(source) and not Path(source).exists():
         raise StimelaConfigError(f"recipe file not found: {source}")
 
     previous = stimela.CONFIG
-    stimela.CONFIG = copy.deepcopy(base)
+    stimela.CONFIG = copy.deepcopy(base.config)
     try:
         recipe_names, paths = _load_sources([source])
         return LoadedConfig(
             config=stimela.CONFIG,
             recipe_names=recipe_names,
-            source_paths=list(base_paths) + paths,
+            source_paths=list(base.source_paths) + paths,
+            skipped_sources=base.skipped,
         )
     finally:
         stimela.CONFIG = previous

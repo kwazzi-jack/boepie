@@ -26,7 +26,12 @@ from boepie.pipeline.runner import (
     list_cabs_with_info,
     load_cab_schema,
 )
-from boepie.pipeline.stimela_config import StimelaConfigError, describe_sources
+from boepie.pipeline.stimela_config import (
+    StimelaConfigError,
+    describe_sources,
+    loaded_config,
+    skipped_sources_note,
+)
 
 # Canonical field order for get_cab_params output. No "examples": scabha
 # parameters do not carry any, and the column was emitting a literal "null"
@@ -60,12 +65,16 @@ def list_cabs(pattern: str | None = None) -> str:
     Returns a count line followed by a CSV table of ``cab``, ``description``.
     """
     try:
-        all_cabs = list_cabs_with_info()
+        config = loaded_config()
+        all_cabs = list_cabs_with_info(config)
     except StimelaConfigError as error:
         return f"Error: {error}"
+    # A library boepie found and could not load is named before the count,
+    # since that count is otherwise a claim about the whole environment.
+    skipped = skipped_sources_note(config.skipped_sources)
     total = len(all_cabs)
     if not all_cabs:
-        return (
+        return skipped + (
             f"Error: no cab definitions found in the configured stimela sources "
             f"({describe_sources()}). Check `boepie config get pipeline.sources`."
         )
@@ -73,10 +82,10 @@ def list_cabs(pattern: str | None = None) -> str:
     if pattern:
         all_cabs = [row for row in all_cabs if fnmatch.fnmatch(row["cab"], pattern)]
         if not all_cabs:
-            return f"No cabs match the pattern '{pattern}'."
+            return skipped + f"No cabs match the pattern '{pattern}'."
 
     header = f"# showing {len(all_cabs)} of {total} cabs\n"
-    return header + write_csv(all_cabs, ["cab", "description"])
+    return skipped + header + write_csv(all_cabs, ["cab", "description"])
 
 
 class GetCabDocsInput(BaseModel):
