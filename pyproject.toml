@@ -28,7 +28,7 @@ dependencies = [
     "pyyaml>=6.0.3",
     "rich>=13.0.0",
     "rich-click>=1.9.8",
-    "scabha>=2.2.0rc0,<2.2.0rc4",
+    "scabha>=2.2.0rc4",
     "stimela>=2.1.4,<3",
     "tomlkit>=0.15.1",
 ]
@@ -59,3 +59,21 @@ mineru = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+# Pinned to the branches that carry the two fixes cult-cargo needs to load at
+# all, neither of which is in any published release. Versions cannot express
+# this: the scabha branch calls itself 2.2.0rc4 and the cult-cargo branch
+# 0.3.0rc0, same as the PyPI releases that lack the fixes, so the revs below
+# are the only thing distinguishing them.
+#   scabha 43af1f1  caracal-pipeline/scabha#45. The placement check added in
+#     2.2.0rc3 ran inside resolve_config_refs, which recurses into a mapping
+#     after that mapping has been merged with its own _include. Key order in
+#     the merged child is a merge artefact, so a legal top-of-mapping _use was
+#     rejected: cult-cargo's pfb-imaging.yml failed at cabs.pfb.degrid.
+#   cult-cargo 875f3bc  branch move-use-statements, off r0.3.0. Finishes the
+#     migration e940632b started: 16 bare _use directives across 13 files
+#     moved to the top of their mapping, the placement rc3 now requires.
+# Drop both once the fixes are released and bump the floors instead.
+[tool.uv.sources]
+scabha = { git = "https://github.com/kwazzi-jack/scabha.git", rev = "43af1f135b244a40dd52b7176c314f46a4535deb" }
+cult-cargo = { git = "https://github.com/kwazzi-jack/cult-cargo.git", rev = "875f3bc5ec998d1a179722e9cac42f63c95ffcf7" }

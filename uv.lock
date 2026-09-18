@@ -172,7 +172,7 @@ requires-dist = [
     { name = "beautifulsoup4", specifier = ">=4.15.0" },
     { name = "bm25s", specifier = ">=0.3.9" },
     { name = "click", specifier = "==8.4.2" },
-    { name = "cult-cargo", specifier = ">=0.2.1" },
+    { name = "cult-cargo", git = "https://github.com/kwazzi-jack/cult-cargo.git?rev=875f3bc5ec998d1a179722e9cac42f63c95ffcf7" },
     { name = "fastembed", specifier = ">=0.8.0" },
     { name = "fastmcp", specifier = "==3.4.7" },
     { name = "httpx", specifier = ">=0.28.1" },
@@ -190,7 +190,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "rich", specifier = ">=13.0.0" },
     { name = "rich-click", specifier = ">=1.9.8" },
-    { name = "scabha", specifier = ">=2.2.0rc0,<2.2.0rc4" },
+    { name = "scabha", git = "https://github.com/kwazzi-jack/scabha.git?rev=43af1f135b244a40dd52b7176c314f46a4535deb" },
     { name = "stimela", specifier = ">=2.1.4,<3" },
     { name = "tomlkit", specifier = ">=0.15.1" },
 ]
@@ -712,15 +712,12 @@ nvtx = [
 
 [[package]]
 name = "cult-cargo"
-version = "0.2.1"
-source = { registry = "https://pypi.org/simple" }
+version = "0.3.0rc0"
+source = { git = "https://github.com/kwazzi-jack/cult-cargo.git?rev=875f3bc5ec998d1a179722e9cac42f63c95ffcf7#875f3bc5ec998d1a179722e9cac42f63c95ffcf7" }
 dependencies = [
     { name = "requests" },
+    { name = "scabha" },
     { name = "stimela" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/d0/95/75cd8753070cec70f1a096c676d0d1b141b0d499770091b2b9ada3f4df64/cult_cargo-0.2.1.tar.gz", hash = "sha256:511a596767654bd26eabeb7b6114c2ea2db7e8901b45de70ae6583b6194af0b4", size = 86959, upload-time = "2026-05-22T11:30:14.46Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/ec/ac/8f5f950432325769ae8ac4fc1d6adf4840321daf289798e91d74d89af173/cult_cargo-0.2.1-py3-none-any.whl", hash = "sha256:6dbed2994c9349f3cdf8137ad9e152d94b08653db36ea6c500a3f0e398544ca5", size = 125194, upload-time = "2026-05-22T11:30:15.727Z" },
 ]
 
 [[package]]
@@ -3221,8 +3218,8 @@ wheels = [
 
 [[package]]
 name = "scabha"
-version = "2.2.0rc2"
-source = { registry = "https://pypi.org/simple" }
+version = "2.2.0rc4"
+source = { git = "https://github.com/kwazzi-jack/scabha.git?rev=43af1f135b244a40dd52b7176c314f46a4535deb#43af1f135b244a40dd52b7176c314f46a4535deb" }
 dependencies = [
     { name = "click" },
     { name = "dill" },
@@ -3233,10 +3230,6 @@ dependencies = [
     { name = "rich" },
     { name = "typeguard" },
     { name = "uritools" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/c6/b1/19252979204bb73d66ba03978d496d0175b9bc4e58f93d3cab51d044be5f/scabha-2.2.0rc2.tar.gz", hash = "sha256:641aef68b0d075371d67948dce4564a3432e12e440cbcededce8eecc7992316b", size = 60299, upload-time = "2026-06-25T11:25:00.631Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/56/26/373c7ba1b4b622031e87c9d7da0f0566e7378d12beeb9e784c9698326494/scabha-2.2.0rc2-py3-none-any.whl", hash = "sha256:a83ac810ee19c3c1612ff849ae76d2892a0398837e8dd38e36743542dcc22f4d", size = 66743, upload-time = "2026-06-25T11:24:59.377Z" },
 ]
 
 [[package]]
