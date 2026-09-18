@@ -485,9 +485,11 @@ def _index_rows(collection: str, index_root: Path) -> bool:
 
     kind = manifest.get("embedding_kind")
     display.muted(
-        f"{kind}:{manifest.get('embedding_model')} ({active_id})"
-        if kind
-        else f"none - BM25 only ({active_id})",
+        (
+            f"{kind}:{manifest.get('embedding_model')} ({active_id})"
+            if kind
+            else f"none - BM25 only ({active_id})"
+        ),
         lead=_status_label("embedding"),
         indent="  ",
     )
@@ -1049,9 +1051,7 @@ def _require_corpus(collections: tuple[str, ...]) -> None:
     when there was none, which made a fresh workspace look like a working one
     - the command reported success against state it had just invented.
     """
-    absent = [
-        name for name in collections if not _corpus_collection_dir(name).is_dir()
-    ]
+    absent = [name for name in collections if not _corpus_collection_dir(name).is_dir()]
     if not absent:
         return
     raise CliError(
@@ -1132,9 +1132,7 @@ def _corpus_fetch_one(
             "documents already written are kept. Re-run the same command to "
             "carry on from where it stopped."
         )
-        raise Cancelled(
-            f"stopped during the {collection} fetch."
-        ) from None
+        raise Cancelled(f"stopped during the {collection} fetch.") from None
 
 
 def _corpus_fetch_literature(
@@ -1453,7 +1451,10 @@ def _managed_counts(documents) -> tuple[int, int]:
     help="Comma-separated collections to index, or 'all'.",
 )
 @click.option(
-    "-l", "--literature", "shorthand", flag_value="literature",
+    "-l",
+    "--literature",
+    "shorthand",
+    flag_value="literature",
     help="Index the literature corpus.",
 )
 @click.option(
@@ -2954,8 +2955,6 @@ def _require_initialised(target_dir: Path, *, corpus: bool = True) -> None:
         _require_corpus(_SYNC_COLLECTIONS)
 
 
-
-
 # ---------------------------------------------------------------------------
 # Setup: one command from a fresh install to a working workspace
 # ---------------------------------------------------------------------------
@@ -3379,7 +3378,6 @@ def setup(
     ctx.invoke(
         register, directory=directory, agents=agents, force=force, check_only=False
     )
-
 
 
 def _register_agents(
